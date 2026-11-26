@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QFrame, QLineEdit, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QButtonGroup, QComboBox, QFrame, QGridLayout, QLineEdit, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from .filters import NO_VALUE
+from .filters import NO_VALUE, Rule
 from .locale import number, translate
 from .theme import FONT_NAMES, THEMES
 from .widgets import (
-    ColumnsDialog, ElidedLabel, Hero, Metric, RuleEditor, TablePanel, button, card, field,
+    ColumnsDialog, DistinctValuesCombo, ElidedLabel, Hero, Metric, RuleEditor, TablePanel, button, card, field,
     fill_options, icon, label, row_layout, section_header,
 )
 
@@ -54,6 +54,7 @@ class PeoplePage(QWidget):
         self.current_sort = ""
         self.sort_reverse = False
         self.columns = ()
+        self.distinct_values = {}
         layout = _page_layout(self)
         self.add_button = button(self.t("add"), "primary")
         self.add_button.setEnabled(False)
@@ -96,12 +97,18 @@ class PeoplePage(QWidget):
         self.term.setClearButtonEnabled(True)
         self.search_icon = self.term.addAction(icon("search", palette.muted, 17), QLineEdit.ActionPosition.LeadingPosition)
         self.search_column = QComboBox()
-        self.search_column.setAccessibleName(self.t("any_column"))
+        self.search_column.setAccessibleName(self.t("directory_column"))
         self.search_column.setMinimumWidth(145)
         self.search_column.setMaximumWidth(274)
+        self.search_column.setToolTip(self.t("directory_column"))
         fill_options(self.search_column, [("", self.t("any_column"))])
-        search.addWidget(self.term, 1)
+        self.search_value = DistinctValuesCombo(self.t("directory_value"), clear_option=True, blank_label=self.t("empty_cells"))
+        self.search_value.setMinimumWidth(145)
+        self.search_value.setMaximumWidth(274)
+        self.search_value.setEnabled(False)
+        search.addWidget(self.term, 2)
         search.addWidget(self.search_column)
+        search.addWidget(self.search_value, 1)
         panel.addLayout(search)
         self.table = TablePanel()
         self.table.view.setAccessibleName(self.t("directory"))
@@ -116,7 +123,8 @@ class PeoplePage(QWidget):
         self.table.empty_action.clicked.connect(self.connect_source)
         self.table.view.doubleClicked.connect(self.edit_person)
         self.term.textChanged.connect(self.search_changed)
-        self.search_column.currentIndexChanged.connect(self.search_changed)
+        self.search_column.currentIndexChanged.connect(self._search_column_changed)
+        self.search_value.choiceChanged.connect(self.search_changed)
         self.table.view.horizontalHeader().sectionClicked.connect(self._sort)
         self.table.view.selectionModel().selectionChanged.connect(self._selection)
         self._selection()
@@ -144,11 +152,36 @@ class PeoplePage(QWidget):
 
     def set_columns(self, columns):
         keep = self.search_column.currentData()
+        value = self.selected_value()
         self.columns = columns
         fill_options(self.search_column, [("", self.t("any_column")), *((column.key, column.title(self.language)) for column in columns)], keep)
+        self.select_value(value if keep == self.search_column.currentData() else None)
         self.add_button.setEnabled(bool(columns))
         self.search_column.setEnabled(bool(columns))
         self.term.setEnabled(bool(columns))
+
+    def _search_column_changed(self):
+        self.select_value(None)
+        self.search_changed.emit()
+
+    def set_distinct_values(self, values):
+        if values is not self.distinct_values:
+            self.distinct_values = values
+            self.select_value(self.selected_value())
+
+    def selected_value(self):
+        return self.search_value.choice()
+
+    def select_value(self, value):
+        key = self.search_column.currentData()
+        self.search_value.setEnabled(bool(key))
+        self.search_value.set_choices(self.distinct_values.get(key, ()), value if key else None)
+
+    def filter_rule(self):
+        key, value = self.search_column.currentData(), self.selected_value()
+        if key and value is not None:
+            return Rule(key, "equals", value) if value else Rule(key, "blank")
+        return None
 
     def present(self, records, connected, has_records):
         selected = self.selected()
@@ -192,6 +225,7 @@ class ReportPage(QWidget):
         self.palette = palette
         self.t = lambda key, **values: translate(language, key, **values)
         self.columns = ()
+        self.distinct_values = {}
         self.selected_keys = None
         self.editors = []
         self.export_busy = False
@@ -203,7 +237,16 @@ class ReportPage(QWidget):
         self.export_button = button(self.t("export"), "primary")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_requested)
-        layout.addWidget(section_header(self.t("reports"), self.t("reports_lead"), self.export_button))
+        header = QWidget()
+        header_layout = row_layout(14)
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        header.setLayout(header_layout)
+        self.report_badge = label()
+        self.report_badge.setFixedSize(51, 51)
+        self.report_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        header_layout.addWidget(self.report_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_layout.addWidget(section_header(self.t("reports"), self.t("reports_lead"), self.export_button), 1)
+        layout.addWidget(header)
 
         filters, body = card()
         top = row_layout(10)
@@ -216,11 +259,13 @@ class ReportPage(QWidget):
         fill_options(self.style, [(key, self.t(key)) for key in ("formal", "modern")])
         self.format = QComboBox()
         fill_options(self.format, [("." + key, self.t(key)) for key in ("xlsx", "docx", "pptx", "csv")])
-        field(top, self.t("report_name"), self.title, 2)
-        field(top, self.t("report_columns"), self.column_button, 1)
-        field(top, self.t("style"), self.style, 1)
-        field(top, self.t("format"), self.format, 1)
+        field(top, self.t("report_name"), self.title, 3)
+        field(top, self.t("report_columns"), self.column_button)
         body.addLayout(top)
+        output = row_layout(10)
+        field(output, self.t("style"), self.style)
+        field(output, self.t("format"), self.format)
+        body.addLayout(output)
 
         divider = QFrame()
         divider.setObjectName("divider")
@@ -277,7 +322,7 @@ class ReportPage(QWidget):
     def add_rule(self, rule=None, notify=True):
         if not self.columns:
             return
-        item = RuleEditor(self.language, self.columns, rule)
+        item = RuleEditor(self.language, self.columns, rule, self.distinct_values)
         item.recolor(self.palette)
         item.changed.connect(self.rules_changed)
         item.removed.connect(lambda: self.remove_rule(item))
@@ -316,6 +361,12 @@ class ReportPage(QWidget):
         for item in self.editors:
             item.set_columns(columns, self.language)
         self.update_column_button()
+
+    def set_distinct_values(self, values):
+        if values is not self.distinct_values:
+            self.distinct_values = values
+            for item in self.editors:
+                item.set_distinct_values(values)
 
     def update_column_button(self):
         self.column_button.setEnabled(bool(self.columns))
@@ -360,6 +411,8 @@ class ReportPage(QWidget):
 
     def recolor(self, palette):
         self.palette = palette
+        self.report_badge.setStyleSheet(f"background: {palette.soft}; border: 1px solid {palette.line}; border-radius: 13px;")
+        self.report_badge.setPixmap(icon("reports", palette.accent, 26).pixmap(26, 26))
         self.export_button.setIcon(icon("download", "#ffffff", 17))
         self.add_rule_button.setIcon(icon("plus", palette.accent, 17))
         for rule in self.editors:
@@ -375,6 +428,7 @@ class SettingsPage(QWidget):
     save_name = Signal()
     copy_backup = Signal()
     reset_local = Signal()
+    configure_combos = Signal()
 
     def __init__(self, language, palette, font, theme, name):
         super().__init__()
@@ -416,20 +470,33 @@ class SettingsPage(QWidget):
         field(first, self.t("font"), self.font_choice)
         panel.addLayout(first)
         panel.addWidget(label(self.t("theme"), "smallMuted"))
-        swatches = row_layout()
+        swatches = QGridLayout()
+        swatches.setSpacing(8)
         self.theme_group = QButtonGroup(self)
         self.themes = {}
-        for key, colors in THEMES.items():
+        for index, (key, colors) in enumerate(THEMES.items()):
             pick = button(self.t(key), "swatch")
             pick.setCheckable(True)
             pick.setProperty("themeKey", key)
             pick.setChecked(key == theme)
             pick.setIcon(icon("offline", colors.accent, 20))
             self.theme_group.addButton(pick)
-            swatches.addWidget(pick, 1)
+            swatches.addWidget(pick, index // 4, index % 4)
             self.themes[key] = pick
         panel.addLayout(swatches)
         layout.addWidget(appearance)
+
+        form_fields, panel = card()
+        panel.addWidget(label(self.t("combo_setup"), "sectionTitle"))
+        panel.addWidget(label(self.t("combo_setup_lead"), "muted", True))
+        selection = row_layout()
+        self.combo_count = label("", "smallMuted")
+        self.combo_button = button(self.t("combo_setup_action"))
+        self.combo_button.clicked.connect(self.configure_combos)
+        selection.addWidget(self.combo_count, 1)
+        selection.addWidget(self.combo_button)
+        panel.addLayout(selection)
+        layout.addWidget(form_fields)
 
         security, panel = card()
         panel.addWidget(label(self.t("local_data"), "sectionTitle"))
@@ -460,6 +527,10 @@ class SettingsPage(QWidget):
 
     def recolor(self, palette):
         self.backup_button.setIcon(icon("download", palette.accent, 17))
+
+    def show_combo_count(self, connected, amount):
+        self.combo_button.setEnabled(connected)
+        self.combo_count.setText(self.t("combo_choices_count", count=number(self.language, amount)) if connected else self.t("no_source"))
 
     def update_source(self, view, backup_exists):
         self.backup_button.setEnabled(backup_exists)

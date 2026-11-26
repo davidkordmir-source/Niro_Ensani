@@ -3,24 +3,30 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QRunnable, QSettings, QThreadPool, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import (
+    QDate, QEasingCurve, QObject, QPropertyAnimation, QRunnable, QSettings, QStandardPaths, QThreadPool, QTimer, Qt, Signal, Slot,
+)
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
-    QApplication, QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QMainWindow, QMessageBox,
+    QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QMainWindow, QMessageBox,
     QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from . import __version__
+from .catalog import distinct_values, report_filename
+from .dashboard import DashboardPage, summarize
 from .filters import filter_records
 from .locale import number, translate
 from .pages import PeoplePage, ReportPage, SettingsPage
+from .record_fields import DEFAULT_COMBO_COLUMNS
 from .reports import Report, export
-from .state import Store
+from .state import Store, namespace
 from .theme import ASSETS, FONT_NAMES, THEMES, interface_font, style
-from .widgets import ElidedLabel, RecordDialog, button, icon, label, row_layout
-from .workbook import WorkbookError, make_template, read_workbook, stamp, update_workbook
+from .widgets import ColumnsDialog, ElidedLabel, RecordDialog, button, icon, label, row_layout
+from .workbook import WorkbookError, make_template, normalize, read_workbook, stamp, update_workbook
 
 
 class _Job(QRunnable):
@@ -82,7 +88,14 @@ class Window(QMainWindow):
         self.last_read = None
         self.problem = ""
         self.status = "disconnected"
-        self.page_key = "people"
+        self.page_key = "dashboard"
+        self.record_dialog = None
+        self.catalog = {}
+        self.summary = summarize(None)
+        self.metadata_busy = False
+        self.metadata_date = QDate.currentDate()
+        self.page_animation = None
+        self.animating_page = None
         self.sync_busy = False
         self.write_busy = False
         self.export_busy = False
@@ -125,6 +138,7 @@ class Window(QMainWindow):
         app.setStyleSheet(style(self.colors))
 
     def _build(self):
+        self._finish_transition()
         root = QWidget()
         horizontal = QHBoxLayout(root)
         horizontal.setContentsMargins(0, 0, 0, 0)
@@ -151,7 +165,7 @@ class Window(QMainWindow):
 
         self.navigation = QButtonGroup(sidebar)
         self.nav = {}
-        for key in ("people", "reports", "settings"):
+        for key in ("dashboard", "people", "reports", "settings"):
             item = button(self.t(key), "nav")
             item.setCheckable(True)
             item.setMinimumHeight(46)
@@ -205,10 +219,11 @@ class Window(QMainWindow):
 
         self.stack = QStackedWidget()
         self.pages = {}
+        self.dashboard = DashboardPage(self.language, self.colors)
         self.people = PeoplePage(self.language, self.colors)
         self.reports = ReportPage(self.language, self.colors)
         self.options = SettingsPage(self.language, self.colors, self.font_key, self.theme, self.display_name)
-        for key, page in (("people", self.people), ("reports", self.reports), ("settings", self.options)):
+        for key, page in (("dashboard", self.dashboard), ("people", self.people), ("reports", self.reports), ("settings", self.options)):
             self.pages[key] = page
             self.stack.addWidget(page)
         body.addWidget(self.stack, 1)
@@ -239,12 +254,14 @@ class Window(QMainWindow):
         self.options.save_name.connect(self.save_name)
         self.options.copy_backup.connect(self.copy_backup)
         self.options.reset_local.connect(self.reset_local)
+        self.options.configure_combos.connect(self.configure_combos)
         self.setCentralWidget(root)
         self._recolor()
-        self.set_page(self.page_key)
+        self.set_page(self.page_key, animate=False)
         self._update_name()
         self._draw_source()
         self._draw_layout()
+        self._show_metadata()
         self._clear_notice()
 
     def _recolor(self):
@@ -256,11 +273,35 @@ class Window(QMainWindow):
             page.recolor(self.colors)
         self._draw_source()
 
-    def set_page(self, key):
+    def set_page(self, key, animate=True):
+        target = self.pages[key]
+        changed = self.stack.currentWidget() is not target
+        self._finish_transition()
         self.page_key = key
-        self.stack.setCurrentWidget(self.pages[key])
+        self.stack.setCurrentWidget(target)
         self.nav[key].setChecked(True)
         self.breadcrumb.setText(self.t("workspace") + " / " + self.t(key))
+        if changed and animate and self.isVisible():
+            effect = QGraphicsOpacityEffect(target)
+            effect.setOpacity(0.78)
+            target.setGraphicsEffect(effect)
+            animation = QPropertyAnimation(effect, b"opacity", self)
+            animation.setDuration(205)
+            animation.setStartValue(0.78)
+            animation.setEndValue(1.0)
+            animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+            animation.finished.connect(self._finish_transition)
+            self.page_animation = animation
+            self.animating_page = target
+            animation.start()
+
+    def _finish_transition(self):
+        if self.page_animation is not None:
+            self.page_animation.stop()
+            self.page_animation.deleteLater()
+            self.page_animation = None
+            self.animating_page.setGraphicsEffect(None)
+            self.animating_page = None
 
     def _update_name(self):
         title = self.display_name or self.t("default_name")
@@ -279,6 +320,7 @@ class Window(QMainWindow):
         if value == self.language:
             return
         search = self.people.term.text(), self.people.search_column.currentData(), self.people.current_sort, self.people.sort_reverse
+        value_filter = self.people.selected_value()
         plan = (self.reports.title.text(), self.reports.style.currentData(), self.reports.format.currentData(),
                 self.reports.combine.currentData(), self.reports.selected_keys, self.reports.rule_values())
         self.language = value
@@ -288,6 +330,7 @@ class Window(QMainWindow):
         self.people.term.setText(search[0])
         self.people.search_column.setCurrentIndex(max(0, self.people.search_column.findData(search[1])))
         self.people.current_sort, self.people.sort_reverse = search[2:]
+        self.people.select_value(value_filter)
         title, layout_style, extension, any_rule, keys, rules = plan
         self.reports.title.setText(title)
         self.reports.style.setCurrentIndex(self.reports.style.findData(layout_style))
@@ -345,13 +388,19 @@ class Window(QMainWindow):
         self.people.pending.setVisible(bool(pending))
         self.people.pending.setText(self.t("pending_notice", count=self.n(pending)))
         self.options.update_source(self.view, bool(self.view and self.store.backup_path(self.view.snapshot.path).exists()))
+        self._show_combo_count()
         self.people.present([], self.view is not None, bool(self.view and self.view.records))
         self.reports.present([], self.view is not None)
 
     def _apply(self, view, reading=True):
-        previous_columns = self.view.snapshot.columns if self.view else ()
-        self.view = view
+        previous = self.view.snapshot if self.view else None
         snapshot = view.snapshot
+        previous_columns = previous.columns if previous else ()
+        if not previous or previous.path != snapshot.path or previous.sheet.key != snapshot.sheet.key:
+            self.catalog = {}
+            self.summary = summarize(None)
+            self._show_metadata()
+        self.view = view
         self.source_path = snapshot.path
         self.preferred_sheet = snapshot.sheet.key, snapshot.sheet.label
         self.settings.setValue("workbook", str(snapshot.path))
@@ -371,8 +420,72 @@ class Window(QMainWindow):
             self.people.pending.setVisible(bool(view.pending))
             self.people.pending.setText(self.t("pending_notice", count=self.n(view.pending)))
             self.options.update_source(view, self.store.backup_path(snapshot.path).exists())
+        self._show_combo_count()
         self._draw_source()
         self._plan_filter(immediate=True)
+        self._update_metadata()
+
+    def _show_metadata(self):
+        self.people.set_distinct_values(self.catalog)
+        self.reports.set_distinct_values(self.catalog)
+        self.dashboard.set_summary(self.summary)
+
+    def _update_metadata(self):
+        if self.metadata_busy:
+            return
+        self.metadata_busy = True
+        view, today = self.view, QDate.currentDate()
+
+        def prepared(result, error):
+            self.metadata_busy = False
+            if self.view is not view:
+                self._update_metadata()
+            elif error:
+                self.notify(self._reason(error))
+            else:
+                self.catalog, self.summary = result
+                self.metadata_date = today
+                self._show_metadata()
+
+        self.bus.submit(lambda: (distinct_values(view), summarize(view, today)), prepared)
+
+    def _combo_overrides(self, view):
+        raw = self.settings.value("formFields/" + namespace(view.snapshot), "{}", str)
+        try:
+            saved = json.loads(raw)
+        except ValueError:
+            return {}
+        return {key: value for key, value in saved.items() if isinstance(value, bool)} if isinstance(saved, dict) else {}
+
+    def _combo_keys(self, view):
+        if not view:
+            return set()
+        overrides = self._combo_overrides(view)
+        return {column.key for column in view.snapshot.columns
+                if overrides.get(column.key, normalize(column.label) in DEFAULT_COMBO_COLUMNS)}
+
+    def _show_combo_count(self):
+        self.options.show_combo_count(bool(self.view and self.view.snapshot.columns), len(self._combo_keys(self.view)))
+
+    def configure_combos(self):
+        view = self.view
+        if not view or not view.snapshot.columns:
+            return
+        columns = view.snapshot.columns
+        dialog = ColumnsDialog(self, self.language, columns, self._combo_keys(view), title=self.t("combo_setup"))
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        selected = dialog.keys()
+        overrides = self._combo_overrides(view)
+        for column in columns:
+            enabled = column.key in selected
+            if enabled == (normalize(column.label) in DEFAULT_COMBO_COLUMNS):
+                overrides.pop(column.key, None)
+            else:
+                overrides[column.key] = enabled
+        self.settings.setValue("formFields/" + namespace(view.snapshot), json.dumps(overrides, ensure_ascii=False))
+        self._show_combo_count()
+        self.notify(self.t("combo_settings_saved"))
 
     def _reason(self, error):
         if isinstance(error, WorkbookError):
@@ -394,6 +507,8 @@ class Window(QMainWindow):
         self.status_detail.setText(self.problem)
 
     def _sync(self):
+        if self.view and self.metadata_date != QDate.currentDate():
+            self._update_metadata()
         if not self.source_path or self.sync_busy or self.write_busy:
             return
         active = self.view.snapshot if self.view else None
@@ -475,9 +590,11 @@ class Window(QMainWindow):
         term, search = self.people.term.text(), self.people.search_column.currentData()
         order, reverse = self.people.current_sort, self.people.sort_reverse
         rules, any_match = self.reports.rule_values(), self.reports.combine.currentData()
+        exact = self.people.filter_rule()
+        directory_rules = (exact,) if exact is not None else ()
 
         def filter_all():
-            directory = filter_records(records, columns, term, search, sort_key=order, reverse=reverse)
+            directory = filter_records(records, columns, term, search, rules=directory_rules, sort_key=order, reverse=reverse)
             reporting = filter_records(records, columns, rules=rules, any_rule=any_match)
             return directory, reporting
 
@@ -495,13 +612,25 @@ class Window(QMainWindow):
         self.bus.submit(filter_all, show)
 
     def _record(self, operation):
+        if self.record_dialog is not None:
+            if self.record_dialog.isMinimized():
+                self.record_dialog.showNormal()
+            self.record_dialog.raise_()
+            self.record_dialog.activateWindow()
+            return
         view = self.view
         if not view or self.write_busy or not view.snapshot.columns:
             return
         record = self.people.selected() if operation != "add" else None
         if operation != "add" and (not record or not any(item is record for item in view.records)):
             return
-        dialog = RecordDialog(self, self.language, view.snapshot.columns, record, operation)
+        choices = {key: self.catalog.get(key, ()) for key in self._combo_keys(view)}
+        dialog = RecordDialog(self, self.language, view.snapshot.columns, record, operation, choices=choices)
+        self.record_dialog = dialog
+
+        def close_dialog():
+            self.record_dialog = None
+            dialog.deleteLater()
         def commit(change):
             target, values = change
             if view is not self.view:
@@ -523,7 +652,8 @@ class Window(QMainWindow):
 
             self._run_write(apply, finished, dialog.failed, expected=view)
         dialog.submitted.connect(commit)
-        dialog.exec()
+        dialog.finished.connect(close_dialog)
+        dialog.show()
 
     def _run_write(self, work, success, fail=None, expected=None):
         if self.write_busy:
@@ -616,7 +746,9 @@ class Window(QMainWindow):
         rules, any_match = self.reports.rule_values(), self.reports.combine.currentData()
         language, layout = self.language, self.reports.style.currentData()
         file_filter = self.t(extension[1:]).replace("(" + extension, "(*" + extension)
-        filename, _ = QFileDialog.getSaveFileName(self, self.t("export"), "Niro-Report" + extension, file_filter)
+        folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        suggested = Path(folder) / report_filename(title, extension, "Niro-Report")
+        filename, _ = QFileDialog.getSaveFileName(self, self.t("export"), str(suggested), file_filter)
         if not filename:
             return
         path = self._extension(Path(filename), extension)
@@ -644,4 +776,5 @@ class Window(QMainWindow):
             event.ignore()
         else:
             self.sync_timer.stop()
+            self._finish_transition()
             event.accept()

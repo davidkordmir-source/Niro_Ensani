@@ -27,9 +27,11 @@ https://pypi.org/project/python-pptx/
 https://pypi.org/project/Pillow/
 https://pypi.org/project/typing-extensions/
 
-Vazirmatn, Estedad, IBM Plex Sans Arabic, SIL Open Font License 1.1
+Vazirmatn, Estedad, IBM Plex Sans Arabic, Cairo, Changa, El Messiri,
+Alexandria, Noto Naskh Arabic, Noto Kufi Arabic, Lalezar and Markazi Text
+SIL Open Font License 1.1
 https://github.com/rastikerdar/vazirmatn
-https://github.com/google/fonts/tree/main/ofl/estedad
+https://github.com/google/fonts/tree/main/ofl
 https://github.com/IBM/plex
 
 The installer and launcher are built with NSIS.

@@ -58,6 +58,10 @@ class Splash(QWidget):
 
 
 def _self_test(app, system_font, output):
+    from PySide6.QtCore import QDate
+    from PySide6.QtWidgets import QComboBox
+
+    from .record_fields import DateField, GREGORIAN, JALALI, _DatePicker
     from .reports import Report, export
     from .workbook import make_template, read_workbook, update_workbook
 
@@ -67,7 +71,15 @@ def _self_test(app, system_font, output):
         make_template(database)
         store = Store(root / "local")
         snapshot = read_workbook(database)
-        draft = {snapshot.columns[0].key: "آزمایشی", snapshot.columns[4].key: "0012"}
+        city = snapshot.columns[7].key
+        marital = snapshot.columns[8].key
+        start = snapshot.columns[16].key
+        today = QDate.currentDate()
+        draft = {
+            snapshot.columns[0].key: "آزمایشی", snapshot.columns[4].key: "0012",
+            city: "تهران", marital: "مجرد", snapshot.columns[10].key: "قطع همکاری",
+            start: today.toString("yyyy/MM/dd"),
+        }
         new = update_workbook(snapshot, "add", None, draft, lambda data: store.backup(database, data))
         view = store.view(new)
         assert view.records[0].values[0] == "آزمایشی"
@@ -85,17 +97,52 @@ def _self_test(app, system_font, output):
         checks.setInterval(60)
         result = []
         def check():
-            if window.people.table.model.rowCount() == 1:
+            if window.people.table.model.rowCount() != 1 or window.catalog.get(city) != ("تهران",):
+                return
+            checks.stop()
+            try:
                 assert window.people.table.model.index(0, 0).data() == "محلی"
+                assert window.summary.total == 1
+                assert sum(window.summary.periods[0].hires) == 1
+                assert window.summary.departures_by_status == 1
+
+                window.set_page("reports")
+                window.reports.add_rule()
+                rule = window.reports.editors[0]
+                rule.columns.setCurrentIndex(rule.columns.findData(city))
+                assert rule.value.findData("تهران") >= 0
+                rule.value.setCurrentIndex(rule.value.findData("تهران"))
+                assert window.reports.rule_values()[0].value == "تهران"
+
+                window.set_page("people")
+                window.people.search_column.setCurrentIndex(window.people.search_column.findData(city))
+                window.people.select_value("تهران")
+                assert window.people.filter_rule().value == "تهران"
+
+                window._record("add")
+                form = window.record_dialog
+                assert isinstance(form.editors[marital], QComboBox)
+                assert isinstance(form.editors[start], DateField)
+                assert form.windowFlags() & Qt.WindowType.WindowMinMaxButtonsHint
+                form.reject()
+                picker = _DatePicker(window, True, today, JALALI)
+                picker.kind.setCurrentIndex(1)
+                assert picker.system() != JALALI
+                assert picker.calendar.selectedDate() == today
+                assert picker.system() == GREGORIAN
+            except Exception as error:
+                result.append(error)
+            else:
                 result.append(True)
-                checks.stop()
-                app.quit()
+            app.quit()
         checks.timeout.connect(check)
         checks.start()
         QTimer.singleShot(10000, app.quit)
         app.exec()
         if not result:
             return 1
+        if result[0] is not True:
+            raise result[0]
         if output is not None:
             Path(output).write_text("Niro Desk native and offline smoke test passed.\n", encoding="utf-8")
         return 0
