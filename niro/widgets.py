@@ -355,11 +355,17 @@ class TablePanel(QStackedWidget):
         self.empty_icon.setPixmap(icon("excel", palette.accent, 35).pixmap(35, 35))
 
     def present(self, columns, records, language, empty, allow_link=False, positions=None):
+        stable = bool(records and self.model.rows and self.model.columns == columns)
+        previous_horizontal = self.view.horizontalScrollBar().value()
+        previous_vertical = self.view.verticalScrollBar().value()
         self.model.show_records(columns, records, language, positions)
         self.empty.setText(empty)
         self.empty_action.setText(translate(language, "open_source"))
         self.empty_action.setVisible(allow_link)
         self.setCurrentIndex(0 if records and columns else 1)
+        if stable:
+            self.view.horizontalScrollBar().setValue(previous_horizontal)
+            self.view.verticalScrollBar().setValue(previous_vertical)
 
 
 class RuleEditor(QFrame):

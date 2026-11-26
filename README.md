@@ -4,7 +4,7 @@
 
 ## نصب روی ویندوز
 
-فایل NiroDesk-Setup-x64.exe را از بخش Releases گیت‌هاب دریافت و اجرا کنید. نصاب برای ویندوز ۱۰ و ۱۱ نسخهٔ ۶۴ بیتی ساخته شده است و میان‌بر **Niro Desk** را روی دسکتاپ و منوی Start قرار می‌دهد. اجرای برنامه به اینترنت، نصب Python یا نصب Excel وابسته نیست. نسخهٔ انتشار فعلی امضای کد ویندوز ندارد و فایل SHA-256 کنار نصاب منتشر می‌شود.
+فایل NiroDesk-Setup-x64.exe را از بخش Releases گیت‌هاب دریافت و اجرا کنید. نصاب برای ویندوز ۱۰ (۱۸۰۹ به بعد) و ۱۱ نسخهٔ ۶۴ بیتی ساخته شده است و میان‌بر **Niro Desk** را روی دسکتاپ و منوی Start قرار می‌دهد. اجرای برنامه به اینترنت، نصب Python یا نصب Excel وابسته نیست. نسخهٔ انتشار فعلی امضای کد ویندوز ندارد و فایل SHA-256 کنار نصاب منتشر می‌شود.
 
 1. فایل بانک خودتان را در یک پوشهٔ محلی نگه دارید.
 2. در برنامه **اتصال فایل اکسل** را بزنید و فایل را انتخاب کنید. در **تنظیمات** می‌توانید شیت فعال را تغییر دهید یا یک بانک خالی بسازید.
@@ -44,4 +44,4 @@ Build the offline Windows x64 installer with NSIS 3.11 or later and Python.
 python packaging/build_windows.py --makensis /path/to/makensis
 ~~~
 
-A version tag such as `v1.0.0` triggers the Windows release workflow. It builds the installer, installs it on Windows, runs the installed application smoke test, and publishes the executable and checksum.
+A version tag such as `v1.0.1` triggers the Windows release workflow. It builds the installer, installs it on Windows, runs the installed application smoke test, and publishes the executable and checksum.
