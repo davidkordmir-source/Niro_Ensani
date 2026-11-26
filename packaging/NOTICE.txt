@@ -1,0 +1,36 @@
+Niro Desk for Windows
+
+This bundle includes the following independent, dynamically loaded software.
+Individual licenses shipped by each upstream distribution are under app/vendor,
+app/niro/assets/fonts, and app/licenses.
+
+Python 3.13.11, Python Software Foundation License
+https://www.python.org/downloads/release/python-31311/
+https://github.com/python/cpython/tree/v3.13.11
+
+Qt 6.10.3, PySide6 Essentials and Shiboken 6.10.3, LGPL version 3
+Copyright The Qt Company Ltd. and contributors.
+Corresponding sources:
+https://download.qt.io/official_releases/qt/6.10/6.10.3/submodules/
+https://code.qt.io/cgit/pyside/pyside-setup.git/tree/?h=v6.10.3
+https://doc.qt.io/qtforpython-6/licenses.html
+https://doc.qt.io/qt-6/licenses-used-in-qt.html
+The Qt and PySide DLLs are separate, loadable and replaceable files.
+You may replace them and reverse engineer the application for the purpose of
+debugging your modifications to these libraries under the terms of the LGPL.
+
+XlsxWriter, lxml, python-docx, python-pptx, Pillow, typing-extensions
+https://pypi.org/project/XlsxWriter/
+https://pypi.org/project/lxml/
+https://pypi.org/project/python-docx/
+https://pypi.org/project/python-pptx/
+https://pypi.org/project/Pillow/
+https://pypi.org/project/typing-extensions/
+
+Vazirmatn, Estedad, IBM Plex Sans Arabic, SIL Open Font License 1.1
+https://github.com/rastikerdar/vazirmatn
+https://github.com/google/fonts/tree/main/ofl/estedad
+https://github.com/IBM/plex
+
+The installer and launcher are built with NSIS.
+https://nsis.sourceforge.io/License
