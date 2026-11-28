@@ -65,23 +65,29 @@ jobs:
       - name: Verify checksum, installation, shortcut and offline workflow
         shell: pwsh
         run: |
-          $setup = Join-Path $PWD "installer/NiroDesk-Setup-x64.exe"
-          $expected = ((Get-Content "$setup.sha256") -split '\s+')[0]
-          if ((Get-FileHash $setup -Algorithm SHA256).Hash -ne $expected) { throw "Installer checksum mismatch" }
-          $installed = Start-Process $setup -ArgumentList "/S" -Wait -PassThru
-          if ($installed.ExitCode -ne 0) { throw "Installer failed: $($installed.ExitCode)" }
-          $root = Join-Path $env:LOCALAPPDATA 'Programs/NiroDesk'
-          $desktop = [Environment]::GetFolderPath('Desktop')
-          if (!(Test-Path (Join-Path $desktop 'Niro Desk.lnk'))) { throw "Missing desktop shortcut" }
-          if (!(Test-Path (Join-Path $root 'NiroDesk.exe'))) { throw "Missing native launcher" }
-          $result = Join-Path $env:RUNNER_TEMP "niro-smoke.txt"
-          $log = Join-Path $env:RUNNER_TEMP "niro-native.log"
-          & "$root/app/python.exe" -I -B "$root/app/launch.py" --self-test --test-output "$result" 2>&1 | Tee-Object -FilePath $log
-          if ($LASTEXITCODE -ne 0 -or !(Test-Path $result)) {
-            $message = (Get-Content $log | Select-Object -Last 10) -join ' '
-            throw "Installed smoke test failed: $message"
+          try {
+            $setup = Join-Path $PWD "installer/NiroDesk-Setup-x64.exe"
+            $expected = ((Get-Content "$setup.sha256") -split '\s+')[0]
+            if ((Get-FileHash $setup -Algorithm SHA256).Hash -ne $expected) { throw "Installer checksum mismatch" }
+            $installed = Start-Process $setup -ArgumentList "/S" -Wait -PassThru
+            if ($installed.ExitCode -ne 0) { throw "Installer failed: $($installed.ExitCode)" }
+            $root = Join-Path $env:LOCALAPPDATA 'Programs/NiroDesk'
+            $desktop = [Environment]::GetFolderPath('Desktop')
+            if (!(Test-Path (Join-Path $desktop 'Niro Desk.lnk'))) { throw "Missing desktop shortcut" }
+            if (!(Test-Path (Join-Path $root 'NiroDesk.exe'))) { throw "Missing native launcher" }
+            $result = Join-Path $env:RUNNER_TEMP "niro-smoke.txt"
+            $log = Join-Path $env:RUNNER_TEMP "niro-native.log"
+            & "$root/app/python.exe" -I -B -X faulthandler "$root/app/launch.py" --self-test --test-output "$result" 2>&1 | Tee-Object -FilePath $log
+            if ($LASTEXITCODE -ne 0 -or !(Test-Path $result)) {
+              $message = (Get-Content $log | Select-Object -Last 14) -join ' '
+              throw "Installed smoke test failed with exit code ${LASTEXITCODE}. $message"
+            }
+            Get-Content $result
+          } catch {
+            $message = $_.Exception.Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Installed Windows checks::$message"
+            exit 1
           }
-          Get-Content $result
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
