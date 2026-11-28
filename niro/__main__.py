@@ -14,6 +14,8 @@ from PySide6.QtCore import QLockFile, QSettings, QStandardPaths, QTimer, Qt
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressBar, QVBoxLayout, QWidget
 
+from .access import Access
+from .access_ui import sign_in
 from .locale import translate
 from .state import Store, namespace
 from .theme import ASSETS, FONT_NAMES, THEMES, interface_font, load_fonts, style
@@ -62,10 +64,14 @@ def _self_test(app, system_font, output):
     from PySide6.QtCore import QCoreApplication, QDate, QEvent, QPoint, QPointF, QRectF
     from PySide6.QtGui import QFontDatabase, QWheelEvent
 
+    from .access import Account, visible_view
+    from .dashboard_tools import export_pack, pack_charts, prepare_pack
     from .insights import load_dataset, prepare_profile, save_attendance
+    from .office import Entry, OfficeStore, iso_day, roster
     from .record_fields import DateField, GREGORIAN, JALALI, _DatePicker
     from .reports import Report, export
     from .schema import PROFILE_SHEET
+    from .timekeeping import SHIFT_DEFAULT, attendance, read_clock
     from .visuals import illustration
     from .widgets import ComboBox
     from .workbook import companion_snapshots, label_key, make_template, read_workbook, update_workbook
@@ -92,6 +98,21 @@ def _self_test(app, system_font, output):
         assert local.records[0].values[0] == "محلی"
         store.copy_backup(database, root / "recovery.xlsx")
         assert not read_workbook(root / "recovery.xlsx").rows
+        access = Access(store)
+        owner = access.save(Account(), "Test administrator", "test-room-admin", "admin", True, True)
+        reader = access.save(owner, "Test reader", "test-room-reader", "reader", False, False)
+        assert access.authenticate(reader.name, "test-room-reader") == reader
+        assert city not in {col.key for col in visible_view(local, reader).snapshot.columns}
+        directory = OfficeStore(store)
+        scope = namespace(local.snapshot)
+        person = roster(local)[0]
+        entry = Entry("profile", person.tokens[0], iso_day(today), {"type": "document", "title": "آزمون"})
+        directory.save(scope, (entry,), owner.name, "dossier_saved", attachment=b"offline test")
+        assert directory.attachment(scope, entry) == b"offline test"
+        clock = root / "clock.csv"
+        clock.write_text("Personnel ID,Date,In,Out\n0012,2026-11-30,08:10,17:00\n", encoding="utf-8")
+        clocks, errors = read_clock(clock, (person,))
+        assert not errors and attendance(clocks[0], SHIFT_DEFAULT) == (530, 10, 60)
         backup = lambda payload: store.backup(database, payload)
         augmented = prepare_profile(load_dataset(local), backup)
         sheet = companion_snapshots(augmented)[PROFILE_SHEET]
@@ -104,7 +125,7 @@ def _self_test(app, system_font, output):
         settings = QSettings(str(root / "preferences.ini"), QSettings.Format.IniFormat)
         settings.setValue("analytics/metrics", "department,leave,sport")
         settings.setValue("dashboard/columns/" + namespace(view.snapshot), json.dumps([city, marital]))
-        window = Window(store, settings, system_font, database, watch_interval=150)
+        window = Window(store, settings, system_font, database, watch_interval=150, account=owner, access=access)
         window.show()
         checks = QTimer()
         checks.setInterval(60)
@@ -131,6 +152,18 @@ def _self_test(app, system_font, output):
                 assert set(dashboard_charts) == {city, marital}
                 assert dashboard_charts[city].model.counts == (("تهران", 1),)
                 assert dashboard_charts[marital].donut.total == 1
+                dashboard_charts[city].picked.emit("تهران")
+                assert window.chart_selection == {city: "تهران"}
+                window.set_page("office", animate=False)
+                assert window.office_page.actions["dossiers"][0].isEnabled()
+                first = today.addDays(-60)
+                summary, rows = prepare_pack(window.view, {city}, window._chart_rules(), first, today, "")
+                pictures = pack_charts(summary, "fa", window.colors)
+                pack = root / "meeting.zip"
+                export_pack(pack, window.view.snapshot.columns, rows, summary, pictures, "fa", first, today, "", window._chart_rules())
+                assert pack.is_file() and len(pictures) >= 2
+                window._clear_chart_selection()
+                window.set_page("analytics", animate=False)
 
                 assert window.analytics.cards["department"].headline.text() == "۱ نفر"
                 assert window.analytics.cards["leave"].headline.text() == "۲ بار"
@@ -264,15 +297,23 @@ def main() -> int:
         if not lock.tryLock(0):
             QMessageBox.information(None, "Niro Desk", translate(language, "already_running"))
             return 0
+        access = Access(store)
     except (OSError, sqlite3.Error):
         QMessageBox.warning(None, "Niro Desk", translate(language, "permission_error"))
         return 1
+
+    app.setQuitOnLastWindowClosed(False)
+    account = sign_in(access, language)
+    app.setQuitOnLastWindowClosed(True)
+    if account is None:
+        return 0
 
     splash = Splash(language, colors, settings.value("name", "", str))
     splash.show()
     windows = []
     def launch():
-        window = Window(store, settings, system_font, options.workbook)
+        window = Window(store, settings, system_font, options.workbook if account.manages else None,
+                        account=account, access=access)
         windows.append(window)
         window.show()
         splash.close()

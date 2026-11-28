@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import os
 from pathlib import Path
 import sqlite3
+import re
 from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
@@ -117,6 +119,10 @@ class Store:
                     PRIMARY KEY (workbook, uid)
                 ) WITHOUT ROWID
             """)
+            db.execute("""CREATE TABLE IF NOT EXISTS audit (
+                id INTEGER PRIMARY KEY, created TEXT NOT NULL, actor TEXT NOT NULL, scope TEXT NOT NULL,
+                operation TEXT NOT NULL, detail BLOB NOT NULL
+            )""")
 
     @contextmanager
     def _connection(self):
@@ -152,10 +158,42 @@ class Store:
         return self.directory / (key + ".previous")
 
     def backup(self, path: Path, payload: bytes) -> None:
-        atomic_file(self.backup_path(path), _protect(payload))
+        protected = _protect(payload)
+        folder = self.directory / "backups" / self.backup_path(path).stem
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        atomic_file(folder / (timestamp + ".xlsx"), protected)
+        atomic_file(self.backup_path(path), protected)
+
+    def versions(self, path: Path) -> tuple[str, ...]:
+        folder = self.directory / "backups" / self.backup_path(path).stem
+        return tuple(sorted((entry.stem for entry in folder.glob("*.xlsx")
+                             if re.fullmatch(r"\d{8}T\d{12}Z", entry.stem)), reverse=True))
+
+    def copy_version(self, path: Path, revision: str, destination: Path) -> None:
+        if not re.fullmatch(r"\d{8}T\d{12}Z", revision):
+            raise ValueError("Invalid backup version")
+        source = self.directory / "backups" / self.backup_path(path).stem / (revision + ".xlsx")
+        atomic_file(destination, _protect(source.read_bytes(), decrypt=True))
 
     def copy_backup(self, path: Path, destination: Path) -> None:
         atomic_file(destination, _protect(self.backup_path(path).read_bytes(), decrypt=True))
+
+    def write_audit(self, db, actor, scope, operation, detail=""):
+        created = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        payload = _protect(json.dumps(detail, ensure_ascii=False).encode("utf-8"))
+        db.execute("INSERT INTO audit (created,actor,scope,operation,detail) VALUES (?,?,?,?,?)",
+                   (created, actor, scope, operation, payload))
+
+    def audit(self, actor, scope, operation, detail=""):
+        with self._connection() as db:
+            self.write_audit(db, actor, scope, operation, detail)
+
+    def audit_entries(self, scope):
+        with self._connection() as db:
+            return tuple((when, actor, action, json.loads(_protect(detail, decrypt=True)))
+                         for when, actor, action, detail in db.execute("""SELECT created,actor,operation,detail
+                             FROM audit WHERE scope IN (?, '') ORDER BY id DESC""", (scope,)))
 
     def clear(self, snapshot: Snapshot) -> View:
         with self._connection() as db:

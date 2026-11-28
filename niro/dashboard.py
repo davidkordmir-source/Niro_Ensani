@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
-from math import ceil, floor, log10
-import unicodedata
+from math import atan2, ceil, degrees, floor, hypot, log10
 
 from PySide6.QtCore import (
     QAbstractTableModel, QCalendar, QDate, QEasingCurve, QEvent, QModelIndex, QPointF, QRectF, QTimer, Qt, Signal,
@@ -20,7 +19,7 @@ from .state import View
 from .theme import linear_fill
 from .visuals import artwork_width, draw_banner
 from .widgets import CardGrid, ComboBox, ElidedLabel, button, card, escaped_tooltip, fill_options, icon, label, row_layout, section_header
-from .workbook import Column, normalize
+from .workbook import Column, group_key as _key
 
 
 COPY = {
@@ -65,10 +64,6 @@ def _text(language: str, key: str, **values) -> str:
     return COPY[key][language == "en"].format(**values)
 
 
-def _key(text: str) -> str:
-    return "".join(char for char in normalize(text) if not unicodedata.combining(char))
-
-
 _START_COLUMNS = (
     "تاریخ ورود به سازمان", "تاریخ استخدام", "تاریخ جذب", "تاریخ شروع همکاری",
     "organization start date", "hire date", "hiring date", "employment start date", "start date", "date of hire",
@@ -109,6 +104,7 @@ class DashboardSummary:
     undated_departures: int
     periods: tuple[Period, ...]
     charts: tuple[tuple[Column, Distribution], ...] = ()
+    status_key: str | None = None
 
 
 def _distribution(records, index: int) -> Distribution:
@@ -123,7 +119,7 @@ def _distribution(records, index: int) -> Distribution:
     return tuple((labels[key], counts[key]) for key in sorted(counts, key=lambda key: (-counts[key], key)))
 
 
-def summarize(view: View | None, today: QDate | None = None, chart_keys=()) -> DashboardSummary:
+def summarize(view: View | None, today: QDate | None = None, chart_keys=(), *, days=None) -> DashboardSummary:
     """Calculate the dashboard from the current personnel view on a worker thread."""
     today = today or QDate.currentDate()
     records = view.records if view else ()
@@ -179,7 +175,7 @@ def summarize(view: View | None, today: QDate | None = None, chart_keys=()) -> D
         Period(days, today.addDays(1 - days), step,
                buckets(hires, days, step, bool(hires) or not records and hire_column is not None),
                buckets(departures, days, step, bool(departures) or not records and exit_column is not None))
-        for days, step in _PERIODS
+        for days, step in (_PERIODS if days is None else ((days, ceil(days / 16)),))
     )
     order = sorted(statuses, key=lambda name: (-statuses[name], name))
     distribution = tuple((display[name], statuses[name]) for name in order)
@@ -190,7 +186,8 @@ def summarize(view: View | None, today: QDate | None = None, chart_keys=()) -> D
     ) if view and chosen else ()
     return DashboardSummary(len(records) if view is not None else None,
                             distribution if status_column is not None else None,
-                            marked if any(order) or not records and status_column is not None else None, undated, periods, charts)
+                            marked if any(order) or not records and status_column is not None else None, undated, periods, charts,
+                            view.snapshot.columns[status_column].key if status_column is not None else None)
 
 
 def _date(language, date, full=False):
@@ -516,6 +513,8 @@ class _Trend(_AnimatedChart):
 
 
 class _Donut(_AnimatedChart):
+    selected = Signal(int)
+
     def __init__(self, language, palette):
         super().__init__(language, palette)
         self.total = 0
@@ -531,13 +530,32 @@ class _Donut(_AnimatedChart):
         self.setFixedHeight(171 if palette.graphic else 143)
         super().recolor(palette)
 
+    def _bounds(self):
+        styled = self.palette.graphic is not None
+        stroke = 23 if styled else 14
+        extent = min(141 if styled else 110, max(1, self.width() - stroke - 14))
+        return QRectF((self.width() - extent) / 2, (self.height() - extent) / 2, extent, extent), stroke
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self.total:
+            ring, stroke = self._bounds()
+            point = event.position() - ring.center()
+            if abs(hypot(point.x(), point.y()) - ring.width() / 2) <= stroke / 2 + 2:
+                angle = (degrees(atan2(point.y(), point.x())) + 90) % 360
+                end = 0.0
+                for index, (count, _) in enumerate(self.segments):
+                    end += 360 * count / self.total
+                    if angle < end:
+                        self.selected.emit(index)
+                        event.accept()
+                        return
+        super().mouseReleaseEvent(event)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         styled = self.palette.graphic is not None
-        stroke = 23 if styled else 14
-        extent = min(141 if styled else 110, max(1, self.width() - stroke - 14))
-        ring = QRectF((self.width() - extent) / 2, (self.height() - extent) / 2, extent, extent)
+        ring, stroke = self._bounds()
         painter.setPen(QPen(QColor(self.palette.line), stroke))
         painter.drawEllipse(ring)
         angle = 90.0
@@ -618,10 +636,15 @@ class _DistributionModel(QAbstractTableModel):
 
 
 class _DistributionCard(QWidget):
+    picked = Signal(str)
+
     def __init__(self, language, palette, title, *, employment=False):
         super().__init__()
         self.language = language
         self.employment = employment
+        self.interactive = False
+        self.active = None
+        self.visible_values = ()
         self.total = 0
         self.model = _DistributionModel(language, self)
         shell = QVBoxLayout(self)
@@ -644,6 +667,7 @@ class _DistributionCard(QWidget):
         self.hint.hide()
         body.addWidget(self.hint)
         self.donut = _Donut(language, palette)
+        self.donut.selected.connect(self._pick_slice)
         legend = QWidget()
         legend_body = QVBoxLayout(legend)
         legend_body.setContentsMargins(0, 0, 0, 0)
@@ -656,6 +680,13 @@ class _DistributionCard(QWidget):
         self.composition.hide()
         body.addWidget(self.composition, 1)
         self.recolor(palette)
+
+    def enable_selection(self, selected=None):
+        if not self.interactive or selected != self.active:
+            self.interactive = True
+            self.active = selected
+            self.donut.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._draw_distribution()
 
     def present(self, counts, total, hint, *, title=None):
         if title is not None:
@@ -682,24 +713,34 @@ class _DistributionCard(QWidget):
             member.hide()
             member.deleteLater()
         counts = self.model.counts
-        groups = [(name or _text(self.language, "unspecified"), amount, _key(name) if self.employment and name else "")
+        groups = [(name or _text(self.language, "unspecified"), amount, name if name is not None else "")
                   for name, amount in counts[:5]]
         if len(counts) > 5:
             remainder = self.total - sum(amount for _, amount, _ in groups)
-            groups.append((_text(self.language, "other" if self.employment else "other_values"), remainder, ""))
+            groups.append((_text(self.language, "other" if self.employment else "other_values"), remainder, None))
+        self.visible_values = tuple(raw for _, _, raw in groups)
 
         theme = self.palette.graphic
         colors = iter((self.palette.accent, "#4382ab", "#a17b55", self.palette.muted, self.palette.hero_end, "#7c8d67"))
         segments = []
-        for index, (name, amount, status) in enumerate(groups):
+        for index, (name, amount, value) in enumerate(groups):
+            status = _key(value or "") if self.employment else ""
             if theme:
                 color = theme.ring[index]
             else:
                 color = self.palette.warning if status in _DEPARTED else self.palette.good if status in _EMPLOYED else next(colors)
-            member = QWidget()
+            member = button("") if self.interactive else QWidget()
             line = row_layout(7)
             line.setContentsMargins(0, 0, 0, 0)
-            if theme or not self.employment:
+            if self.interactive:
+                color_fill = self.palette.line if self.active == value and value is not None else self.palette.soft
+                member.setObjectName("distributionRow")
+                member.setStyleSheet(f"QPushButton#distributionRow {{ background:{color_fill}; border:0; border-radius:7px; padding:0; }}"
+                                     f"QPushButton#distributionRow:hover {{ background:{self.palette.line}; }}")
+                member.setAccessibleName(f"{name} · {number(self.language, amount)}")
+                member.clicked.connect(lambda checked=False, idx=index: self._pick_slice(idx))
+                line.setContentsMargins(6, 4, 6, 4)
+            elif theme or not self.employment:
                 member.setObjectName("distributionRow")
                 member.setStyleSheet(f"QWidget#distributionRow {{ background: {self.palette.soft}; border-radius: 7px; }}")
                 line.setContentsMargins(6, 4, 6, 4)
@@ -709,12 +750,24 @@ class _DistributionCard(QWidget):
             dot.setStyleSheet(f"background:{color}; border-radius:4px;")
             category = ElidedLabel("smallMuted")
             category.setText(name)
+            count = label(number(self.language, amount), "smallMuted")
+            if self.interactive:
+                for child in (dot, category, count):
+                    child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
             line.addWidget(dot)
             line.addWidget(category, 1)
-            line.addWidget(label(number(self.language, amount), "smallMuted"))
+            line.addWidget(count)
             self.legend.addWidget(member)
             segments.append((amount, color))
         self.donut.set_counts(tuple(segments), self.total)
+
+    def _pick_slice(self, index):
+        if self.interactive and 0 <= index < len(self.visible_values):
+            value = self.visible_values[index]
+            if value is None:
+                self._show_values()
+            else:
+                self.picked.emit(value)
 
     def _show_values(self):
         dialog = QDialog(self)
@@ -733,11 +786,22 @@ class _DistributionCard(QWidget):
         close = button(translate(self.language, "close"))
         close.clicked.connect(dialog.accept)
         layout.addWidget(close, 0, Qt.AlignmentFlag.AlignTrailing)
+        if self.interactive:
+            def choose(index):
+                name, _ = self.model.counts[index.row()]
+                dialog.accept()
+                self.picked.emit(name or "")
+            table.doubleClicked.connect(choose)
         dialog.exec()
 
 
 class DashboardPage(QWidget):
     choose_charts = Signal()
+    category_selected = Signal(str, str)
+    selection_cleared = Signal()
+    open_selection = Signal()
+    choose_layout = Signal()
+    meeting_requested = Signal()
 
     def __init__(self, language, palette):
         super().__init__()
@@ -791,7 +855,30 @@ class DashboardPage(QWidget):
         self.chart_button.setEnabled(False)
         self.chart_button.clicked.connect(self.choose_charts)
         chart_bar.addWidget(self.chart_button)
+        self.layout_button = button(translate(language, "charts_layout"))
+        self.layout_button.clicked.connect(self.choose_layout)
+        chart_bar.addWidget(self.layout_button)
+        self.meeting_button = button(translate(language, "meeting"))
+        self.meeting_button.clicked.connect(self.meeting_requested)
+        chart_bar.addWidget(self.meeting_button)
         body.addLayout(chart_bar)
+
+        self.selection_bar, selection_content = card()
+        selection = row_layout(7)
+        self.selection_caption = ElidedLabel("sectionTitle")
+        open_results = button(translate(language, "drill_result"), "primary")
+        clear = button(translate(language, "clear_selection"))
+        open_results.clicked.connect(self.open_selection)
+        clear.clicked.connect(self.selection_cleared)
+        selection.addWidget(self.selection_caption, 1)
+        selection.addWidget(open_results)
+        selection.addWidget(clear)
+        selection_content.addLayout(selection)
+        self.selection_bar.hide()
+        layout.addWidget(self.selection_bar)
+        self.selected_values = {}
+        self.layout_order = ()
+        self.wide_cards = frozenset()
 
         charts = row_layout(12)
         trend_frame, trend_body = card()
@@ -817,6 +904,7 @@ class DashboardPage(QWidget):
         charts.addWidget(trend_frame, 7)
 
         self.employment = _DistributionCard(language, palette, self._t("statuses"), employment=True)
+        self.employment.picked.connect(self._pick_employment)
         charts.addWidget(self.employment, 4)
         body.addLayout(charts, 1)
         self.chart_cards = {}
@@ -850,7 +938,24 @@ class DashboardPage(QWidget):
         total = summary.total or 0
         hint = self._t("empty" if not total else "status_empty") if summary.total is not None else ""
         self.employment.present(summary.statuses or (), total, hint)
+        self.employment.enable_selection(self.selected_values.get(summary.status_key))
         self._present_charts(summary.charts, total)
+
+    def _pick_employment(self, value):
+        if self.summary.status_key:
+            self.category_selected.emit(self.summary.status_key, value)
+
+    def set_selection(self, selected, titles):
+        self.selected_values = dict(selected)
+        self.selection_caption.setText("  ·  ".join(f"{titles.get(key, key)}: {value or self._t('unspecified')}"
+                                                    for key, value in selected.items()))
+        self.selection_bar.setVisible(bool(selected))
+        self.employment.enable_selection(selected.get(self.summary.status_key))
+        for key, panel in self.chart_cards.items():
+            panel.enable_selection(selected.get(key))
+
+    def set_card_layout(self, order, wide):
+        self.layout_order, self.wide_cards = tuple(order), frozenset(wide)
 
     def _present_charts(self, charts, total):
         keys = {column.key for column, _ in charts}
@@ -859,15 +964,18 @@ class DashboardPage(QWidget):
             panel.hide()
             panel.deleteLater()
         ordered = []
-        for column, counts in charts:
+        positions = {key: i for i, key in enumerate(self.layout_order)}
+        for column, counts in sorted(charts, key=lambda item: positions.get(item[0].key, len(positions))):
             title = column.title(self.language)
             panel = self.chart_cards.get(column.key)
             if panel is None:
                 panel = self.chart_cards[column.key] = _DistributionCard(self.language, self.palette, title)
                 panel.setParent(self.chart_grid)
+                panel.picked.connect(lambda value, key=column.key: self.category_selected.emit(key, value))
             panel.present(counts, total, self._t("empty"), title=title)
+            panel.enable_selection(self.selected_values.get(column.key))
             ordered.append(panel)
-        self.chart_grid.show_cards(ordered)
+        self.chart_grid.show_cards(ordered, (self.chart_cards[key] for key in self.wide_cards if key in self.chart_cards))
         self.chart_grid.setVisible(bool(ordered))
         for panel in ordered:
             panel.show()

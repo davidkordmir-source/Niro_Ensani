@@ -130,6 +130,7 @@ class AttendancePage(QWidget):
         self.language = language
         self.t = lambda key, **values: tr(language, key, **values)
         self.data = None
+        self.editable = True
         self.names = {}
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
@@ -193,7 +194,7 @@ class AttendancePage(QWidget):
         self.data = dataset
         self.names = {entry.ref: entry.name for entry in dataset.people} if dataset else {}
         available = bool(dataset and any(person.stable for person in dataset.people))
-        self.add_button.setEnabled(available)
+        self.add_button.setEnabled(available and self.editable)
         notice = self.t("passive")
         if dataset and not available:
             notice = self.t("attendance_no_ids")
@@ -221,9 +222,14 @@ class AttendancePage(QWidget):
         self._selection()
 
     def _selection(self):
-        selected = self.selected() is not None
+        selected = self.editable and self.selected() is not None
         self.edit_button.setEnabled(selected)
         self.del_button.setEnabled(selected)
+
+    def set_permissions(self, editable):
+        self.editable = editable
+        self.add_button.setEnabled(editable and bool(self.data and any(person.stable for person in self.data.people)))
+        self._selection()
 
     def selected(self):
         selection = self.table.selectionModel().selectedRows()

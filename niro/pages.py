@@ -41,6 +41,8 @@ def _scroll(parent_layout):
 
 
 class PeoplePage(QWidget):
+    dossier_requested = Signal()
+    clear_extra_filters = Signal()
     connect_source = Signal()
     add_person = Signal()
     edit_person = Signal()
@@ -56,6 +58,7 @@ class PeoplePage(QWidget):
         self.current_sort = ""
         self.sort_reverse = False
         self.columns = ()
+        self.allow_edit = self.allow_delete = self.allow_dossiers = True
         self.distinct_values = {}
         layout = _page_layout(self)
         self.add_button = button(self.t("add"), "primary")
@@ -75,6 +78,16 @@ class PeoplePage(QWidget):
         self.pending = label("", "warning", True)
         self.pending.hide()
         layout.addWidget(self.pending)
+        self.extra_filters = QWidget()
+        selected = row_layout(8)
+        selected.setContentsMargins(0, 0, 0, 0)
+        self.extra_filters.setLayout(selected)
+        selected.addWidget(label(self.t("query_notice"), "smallMuted", True), 1)
+        clear = button(self.t("clear_selection"))
+        clear.clicked.connect(self.clear_extra_filters)
+        selected.addWidget(clear)
+        self.extra_filters.hide()
+        layout.addWidget(self.extra_filters)
 
         pane, panel = card()
         pane.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
@@ -86,6 +99,8 @@ class PeoplePage(QWidget):
         self.edit_button = button(self.t("edit"))
         self.delete_button = button(self.t("delete"), "danger")
         self.restore_button = button(self.t("restore_row"))
+        self.dossier_button = button(self.t("dossiers"))
+        self.dossier_button.clicked.connect(self.dossier_requested)
         self.restore_button.hide()
         top.addWidget(self.restore_button)
         top.addWidget(self.edit_button)
@@ -112,6 +127,10 @@ class PeoplePage(QWidget):
         search.addWidget(self.search_column)
         search.addWidget(self.search_value, 1)
         panel.addLayout(search)
+        record_actions = row_layout(7)
+        record_actions.addWidget(self.dossier_button)
+        record_actions.addStretch(1)
+        panel.addLayout(record_actions)
         self.table = TablePanel()
         self.table.view.setAccessibleName(self.t("directory"))
         self.table.view.horizontalHeader().setSectionsClickable(True)
@@ -134,9 +153,16 @@ class PeoplePage(QWidget):
 
     def _selection(self):
         record = self.selected()
-        self.edit_button.setEnabled(record is not None)
-        self.delete_button.setEnabled(record is not None)
-        self.restore_button.setVisible(bool(record and record.overlay and record.source))
+        self.edit_button.setEnabled(bool(record and self.allow_edit))
+        self.delete_button.setEnabled(bool(record and self.allow_delete))
+        self.restore_button.setVisible(bool(record and record.overlay and record.source and self.allow_delete))
+        self.dossier_button.setVisible(self.allow_dossiers)
+        self.dossier_button.setEnabled(bool(record and self.allow_dossiers))
+
+    def permissions(self, edit, delete, dossiers):
+        self.allow_edit, self.allow_delete, self.allow_dossiers = edit, delete, dossiers
+        self.add_button.setEnabled(edit and bool(self.columns))
+        self._selection()
 
     def selected(self):
         selected = self.table.view.selectionModel().selectedRows()
@@ -158,7 +184,7 @@ class PeoplePage(QWidget):
         self.columns = columns
         fill_options(self.search_column, [("", self.t("any_column")), *((column.key, column.title(self.language)) for column in columns)], keep)
         self.select_value(value if keep == self.search_column.currentData() else None)
-        self.add_button.setEnabled(bool(columns))
+        self.add_button.setEnabled(self.allow_edit and bool(columns))
         self.search_column.setEnabled(bool(columns))
         self.term.setEnabled(bool(columns))
 
@@ -229,6 +255,7 @@ class ReportPage(QWidget):
         self.distinct_values = {}
         self.selected_keys = None
         self.editors = []
+        self.can_export = True
         self.export_busy = False
         self.report_ready = False
 
@@ -352,7 +379,7 @@ class ReportPage(QWidget):
         for rule in self.rule_values():
             if rule.key not in keys:
                 return "missing_rule_column"
-            if rule.operator not in NO_VALUE and (not rule.value.strip() or (rule.operator == "between" and not rule.upper.strip())):
+            if rule.operator not in NO_VALUE and (not rule.value.strip() or (rule.operator in ("between", "calendar_between") and not rule.upper.strip())):
                 return "need_filter"
         return ""
 
@@ -397,7 +424,7 @@ class ReportPage(QWidget):
 
     def set_busy(self, busy):
         self.export_busy = busy
-        self.export_button.setEnabled(self.report_ready and not busy)
+        self.export_button.setEnabled(self.can_export and self.report_ready and not busy)
         self.export_button.setText(self.t("working_export" if busy else "export"))
 
     def present(self, records, connected, preview_limit=120):
@@ -406,7 +433,7 @@ class ReportPage(QWidget):
         self.hint.setVisible(connected and (not chosen or bool(error)))
         self.hint.setText(self.t(error or "select_columns_error"))
         self.report_ready = connected and bool(chosen) and not error
-        self.export_button.setEnabled(self.report_ready and not self.export_busy)
+        self.export_button.setEnabled(self.can_export and self.report_ready and not self.export_busy)
         empty = "no_source" if not connected else "select_columns_error" if not chosen else "no_report"
         self.table.present(chosen, records[:preview_limit], self.language, self.t(empty), positions=positions)
         self.total.setText(self.t("preview_count", shown=number(self.language, min(len(records), preview_limit)),
@@ -480,6 +507,7 @@ class SettingsPage(QWidget):
         field(workbook, self.t("sheet"), self.sheet, 2)
         connect = button(self.t("change_source"))
         blank = button(self.t("blank_workbook"))
+        self.source_actions = connect, blank
         workbook.addWidget(connect, 0, Qt.AlignmentFlag.AlignBottom)
         workbook.addWidget(blank, 0, Qt.AlignmentFlag.AlignBottom)
         panel.addLayout(workbook)

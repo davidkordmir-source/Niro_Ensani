@@ -52,6 +52,10 @@ def label_key(label: str) -> str:
     return normalize(label)
 
 
+def group_key(value: str) -> str:
+    return "".join(char for char in normalize(value) if not unicodedata.combining(char))
+
+
 def is_companion(label: str) -> bool:
     return label_key(label) in _COMPANION_KEYS
 
@@ -492,7 +496,7 @@ class _SheetData:
             raise WorkbookError("add_in_excel")
         return number, True
 
-    def change(self, operation: str, number: int | None, values: dict[str, str]) -> dict[str, bytes]:
+    def change(self, operation: str, number: int | None, values: dict[str, str], *, serialize=True) -> dict[str, bytes]:
         if not self.columns:
             raise WorkbookError("no_headers")
         if self.root.find(_tag("sheetProtection")) is not None or any(
@@ -552,7 +556,8 @@ class _SheetData:
                 left, top, right, bottom = _bounds(dimension.get("ref", "A1"))
                 touched = [self.by_key[key].index for key in values]
                 dimension.set("ref", f"{_letter(min([left, *touched]))}{min(top, number)}:{_letter(max([right, *touched]))}{max(bottom, number)}")
-        parts[self.sheet.part] = _xml_bytes(self.root)
+        if serialize:
+            parts[self.sheet.part] = _xml_bytes(self.root)
         return parts
 
 
@@ -645,6 +650,24 @@ def update_workbook(snapshot: Snapshot, operation: str, row_number: int | None, 
             parts["[Content_Types].xml"] = _xml_bytes(content)
         parts[BOOK] = _xml_bytes(reader.book)
         return parts, removed
+
+    return _edit_package(snapshot, edit, backup)
+
+
+def update_workbook_cells(snapshot, edits, backup):
+    """Apply a previewed set of cell edits to one workbook revision atomically."""
+    if not edits:
+        return snapshot
+
+    def edit(original):
+        reader = _Reader(original)
+        sheet = reader.select((snapshot.sheet.key, snapshot.sheet.label))
+        for number, values in edits.items():
+            sheet.change("edit", number, values, serialize=False)
+        calc = reader.book.find(_tag("calcPr"))
+        if calc is not None:
+            calc.set("fullCalcOnLoad", "1")
+        return {sheet.sheet.part: _xml_bytes(sheet.root), BOOK: _xml_bytes(reader.book)}, set()
 
     return _edit_package(snapshot, edit, backup)
 

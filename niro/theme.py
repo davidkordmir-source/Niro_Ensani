@@ -273,6 +273,37 @@ THEMES.update({
 })
 
 
+def _illustrated(base, artwork, quadrant, hero, accents, *, line_chart=True):
+    start, end, ink, detail = hero
+    x, y = quadrant % 2 * 768, quadrant // 2 * 512
+    p = THEMES[base]
+    bands = tuple(CountColors(p.surface, p.soft, p.text, color) for color in accents[:3])
+    design = GraphicDesign(artwork, (x, y, 768, 512), ink, detail, p.sidebar_hover,
+                           p.accent, p.accent_hover, bands, accents[:2], accents,
+                           line_chart=line_chart, cover_art=True)
+    return replace(p, hero_start=start, hero_end=end, hero_secondary=ink, graphic=design)
+
+
+THEMES.update({
+    "rainy_city": _illustrated("graphite", "studio-materials.png", 0, ("#121b30", "#152731", "#d9edff", "#80ddff"),
+                               ("#7ddcff", "#ff9fc9", "#a5b7ff", "#90eddf", "#e9cf96", "#88a9b9")),
+    "porcelain": _illustrated("cobalt", "studio-materials.png", 1, ("#fffffc", "#deeaf9", "#203c69", "#8ca8d8"),
+                               ("#2d62a3", "#927bb9", "#34788e", "#9f7544", "#b5678b", "#64937f"), line_chart=False),
+    "copper_studio": _illustrated("espresso", "studio-materials.png", 2, ("#2b211b", "#60402e", "#fff2db", "#ffba76"),
+                                   ("#f6ba76", "#e8978a", "#f5d79d", "#a2d1b0", "#c9a57b", "#c8abc8"), line_chart=False),
+    "vineyard": _illustrated("jade", "studio-materials.png", 3, ("#fcfbea", "#e0e7c7", "#34462c", "#7b9b62"),
+                               ("#52834b", "#a36f46", "#567f79", "#a29151", "#997386", "#749c65")),
+    "plum_hour": _illustrated("wine", "studio-atmosphere.png", 0, ("#28182e", "#523057", "#fff0fa", "#f0a9dc"),
+                                ("#f3a5ca", "#c9b2ff", "#f5ba99", "#9fd4dd", "#dfcf97", "#b2a5c9")),
+    "frosted_ink": _illustrated("arctic", "studio-atmosphere.png", 1, ("#fcfcfa", "#dce5e7", "#253d46", "#a5b6bf"),
+                                  ("#446b7f", "#8e7464", "#596572", "#588f81", "#8d859d", "#778e97"), line_chart=False),
+    "monsoon": _illustrated("forest", "studio-atmosphere.png", 2, ("#122927", "#2b534a", "#ebfff6", "#70daca"),
+                              ("#79e7d2", "#92cafa", "#d8e69e", "#81c6a1", "#f1c993", "#c3afd9")),
+    "peach_bloom": _illustrated("rose", "studio-atmosphere.png", 3, ("#fff6ef", "#f8dbd2", "#653446", "#de9a9b"),
+                                  ("#a75974", "#ae6e43", "#8e689e", "#4e8478", "#ba8c52", "#7e82aa"), line_chart=False),
+})
+
+
 def linear_fill(start: str, end: str) -> str:
     return f"qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 {start},stop:1 {end})"
 

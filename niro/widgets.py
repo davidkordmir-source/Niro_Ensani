@@ -90,15 +90,18 @@ class CardGrid(QWidget):
     def __init__(self):
         super().__init__()
         self.cards = ()
+        self.wide = frozenset()
         self.columns = 0
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(0, 0, 0, 0)
         self.grid.setSpacing(12)
 
-    def show_cards(self, cards):
+    def show_cards(self, cards, wide=()):
         cards = tuple(cards)
-        if cards != self.cards:
+        wide = frozenset(wide)
+        if (cards, wide) != (self.cards, self.wide):
             self.cards = cards
+            self.wide = wide
             self.columns = 0
             self._place()
 
@@ -115,8 +118,13 @@ class CardGrid(QWidget):
             self.grid.takeAt(0)
         self.grid.setColumnStretch(0, 1)
         self.grid.setColumnStretch(1, int(columns == 2))
-        for index, widget in enumerate(self.cards):
-            self.grid.addWidget(widget, index // columns, index % columns)
+        slot = 0
+        for widget in self.cards:
+            width = columns if widget in self.wide else 1
+            if width > 1 and slot % columns:
+                slot += columns - slot % columns
+            self.grid.addWidget(widget, slot // columns, slot % columns, 1, width)
+            slot += width
 
 
 def fill_options(combo: QComboBox, options, value=None) -> None:
@@ -202,6 +210,10 @@ def icon(name: str, color: str, size: int = 20) -> QIcon:
         line((16, 3), (16, 7))
         line((4, 9), (20, 9))
         line((8, 15), (11, 18), (16, 12))
+    elif name == "briefcase":
+        rect(3, 7, 18, 13)
+        line((8, 7), (8, 4), (16, 4), (16, 7))
+        line((3, 12), (10, 14), (14, 14), (21, 12))
     elif name == "search":
         dot(10, 10, 5.5)
         line((14.2, 14.2), (20, 20))
@@ -613,9 +625,9 @@ class RuleEditor(QFrame):
 
     def _operator(self):
         current = self.operators.currentData()
-        self.value.set_editable_choice(current not in ("equals", "not_equals"))
+        self.value.set_editable_choice(current not in ("equals", "not_equals", "group"))
         self.value.setVisible(current not in NO_VALUE)
-        self.upper.setVisible(current == "between")
+        self.upper.setVisible(current in ("between", "calendar_between"))
         self.changed.emit()
 
     def rule(self):

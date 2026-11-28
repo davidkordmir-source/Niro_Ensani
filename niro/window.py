@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from hashlib import sha256
 import json
 from pathlib import Path
+import sqlite3
 
 from PySide6.QtCore import (
     QDate, QEasingCurve, QObject, QPropertyAnimation, QRunnable, QSettings, QStandardPaths, QThreadPool, QTimer, Qt, Signal, Slot,
@@ -16,21 +18,27 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .access import Access, Account, visible_view
+from .access_ui import AccountsDialog, AuditDialog
 from .attendance_page import AttendanceDialog, AttendancePage
 from .catalog import distinct_values, report_filename
 from .dashboard import DashboardPage, summarize
-from .filters import filter_records
+from .dashboard_tools import LayoutDialog, PhraseDialog, ResultsDialog, export_pack, meeting_settings, pack_charts, prepare_pack
+from .filters import Rule, filter_records
 from .insights import evaluate, load_dataset, prepare_profile, save_attendance, tr as insight_text
 from .insights_page import AnalyticsPage, SourceDialog
 from .locale import number, translate
+from .office import OfficeStore, reminders, roster
+from .office_ui import DossierDialog, OfficePage, QualityDialog, ReminderDialog, reminder_settings
 from .pages import PeoplePage, ReportPage, SettingsPage
 from .record_fields import DEFAULT_COMBO_COLUMNS
 from .reports import Report, export
 from .state import Store, namespace
 from .theme import ASSETS, FONT_NAMES, THEMES, application_palette, interface_font, style
+from .time_ui import TimekeepingDialog
 from .visuals import brandmark
 from .widgets import ColumnsDialog, ElidedLabel, RecordDialog, button, icon, label, row_layout
-from .workbook import WorkbookError, make_template, normalize, read_workbook, stamp, update_workbook
+from .workbook import WorkbookError, group_key, make_template, normalize, read_workbook, stamp, update_workbook
 
 
 class _Job(QRunnable):
@@ -72,10 +80,15 @@ class TaskBus(QObject):
 
 
 class Window(QMainWindow):
+    audit_error = Signal()
+
     def __init__(self, store: Store, settings: QSettings, system_font, initial_file: Path | None = None,
-                 watch_interval=950):
+                 watch_interval=950, *, account=None, access=None):
         super().__init__()
         self.store = store
+        self.access = access if access else Access(store)
+        self.account = account if account else Account()
+        self.office_store = OfficeStore(store)
         self.settings = settings
         self.system_font = system_font
         self.language = settings.value("language", "fa", str)
@@ -89,6 +102,7 @@ class Window(QMainWindow):
         self.preferred_sheet = None if initial_file else (
             settings.value("worksheet", "", str), settings.value("worksheetName", "", str))
         self.view = None
+        self.source_view = None
         self.last_read = None
         self.problem = ""
         self.status = "disconnected"
@@ -112,7 +126,12 @@ class Window(QMainWindow):
         self.filter_queued = False
         self.report_records = []
         self.directory_records = []
+        self.directory_rules = ()
+        self.chart_selection = {}
+        self.reminder_busy = False
+        self.reminder_count = 0
         self.bus = TaskBus(self)
+        self.audit_error.connect(self._notify_audit_error, Qt.ConnectionType.QueuedConnection)
         self.filter_timer = QTimer(self)
         self.filter_timer.setSingleShot(True)
         self.filter_timer.setInterval(155)
@@ -127,6 +146,10 @@ class Window(QMainWindow):
         self.notice_timer = QTimer(self)
         self.notice_timer.setSingleShot(True)
         self.notice_timer.timeout.connect(self._clear_notice)
+        self.reminder_timer = QTimer(self)
+        self.reminder_timer.setSingleShot(True)
+        self.reminder_timer.setInterval(260)
+        self.reminder_timer.timeout.connect(self._refresh_reminders)
         self.setWindowIcon(QIcon(str(ASSETS / "niro.png")))
         self.resize(1320, 850)
         self.setMinimumSize(870, 663)
@@ -177,7 +200,9 @@ class Window(QMainWindow):
 
         self.navigation = QButtonGroup(sidebar)
         self.nav = {}
-        for key in ("dashboard", "analytics", "people", "attendance", "reports", "settings"):
+        for key in ("dashboard", "analytics", "people", "office", "attendance", "reports", "settings"):
+            if key in ("analytics", "attendance") and not self.account.sees_sensitive:
+                continue
             item = button(self.t(key), "nav")
             item.setCheckable(True)
             item.setMinimumHeight(46)
@@ -236,13 +261,18 @@ class Window(QMainWindow):
         self.people = PeoplePage(self.language, self.colors)
         self.attendance = AttendancePage(self.language, self.colors)
         self.reports = ReportPage(self.language, self.colors)
+        self.office_page = OfficePage(self)
         self.options = SettingsPage(self.language, self.colors, self.font_key, self.theme, self.display_name, self.system_font)
         for key, page in (
             ("dashboard", self.dashboard), ("analytics", self.analytics), ("people", self.people),
-            ("attendance", self.attendance), ("reports", self.reports), ("settings", self.options),
+            ("office", self.office_page), ("attendance", self.attendance), ("reports", self.reports), ("settings", self.options),
         ):
-            self.pages[key] = page
-            self.stack.addWidget(page)
+            if key in self.nav:
+                self.pages[key] = page
+                self.stack.addWidget(page)
+            else:
+                page.setParent(self.stack)
+                page.hide()
         body.addWidget(self.stack, 1)
         bar = row_layout(6)
         bar.setContentsMargins(28, 3, 28, 10)
@@ -256,7 +286,14 @@ class Window(QMainWindow):
         horizontal.addWidget(stage, 1)
 
         self.dashboard.choose_charts.connect(self._configure_dashboard_charts)
+        self.dashboard.choose_layout.connect(self._configure_layout)
+        self.dashboard.category_selected.connect(self._select_chart_category)
+        self.dashboard.selection_cleared.connect(self._clear_chart_selection)
+        self.dashboard.open_selection.connect(self._open_chart_results)
+        self.dashboard.meeting_requested.connect(self.export_meeting)
         self.people.connect_source.connect(self.choose_file)
+        self.people.dossier_requested.connect(self.open_selected_dossier)
+        self.people.clear_extra_filters.connect(self.clear_directory_rules)
         self.people.add_person.connect(lambda: self._record("add"))
         self.people.edit_person.connect(lambda: self._record("edit"))
         self.people.remove_person.connect(lambda: self._record("delete"))
@@ -302,9 +339,11 @@ class Window(QMainWindow):
     def _color_navigation(self):
         for key, item in self.nav.items():
             color = "#ffffff" if self.colors.graphic and key == self.page_key else self.colors.sidebar_text
-            item.setIcon(icon(key, color))
+            item.setIcon(icon("briefcase" if key == "office" else key, color))
 
     def set_page(self, key, animate=True):
+        if key not in self.pages:
+            key = "dashboard"
         target = self.pages[key]
         changed = self.stack.currentWidget() is not target
         self._finish_transition()
@@ -428,12 +467,15 @@ class Window(QMainWindow):
         self.people.pending.setVisible(bool(pending))
         self.people.pending.setText(self.t("pending_notice", count=self.n(pending)))
         self.options.update_source(self.view, bool(self.view and self.store.backup_path(self.view.snapshot.path).exists()))
+        self._show_permissions()
         self._show_combo_count()
         self.people.present([], self.view is not None, bool(self.view and self.view.records))
         self.reports.present([], self.view is not None)
 
     def _apply(self, view, reading=True):
         previous = self.view.snapshot if self.view else None
+        self.source_view = view
+        view = visible_view(view, self.account, self.private_fields(view))
         snapshot = view.snapshot
         previous_columns = previous.columns if previous else ()
         if not previous or previous.path != snapshot.path or previous.sheet.key != snapshot.sheet.key:
@@ -441,8 +483,14 @@ class Window(QMainWindow):
             self.summary = summarize(None)
             self.analytics_data = None
             self.dashboard.chart_to_reveal = None
+            self.chart_selection.clear()
+            self.directory_rules = ()
+            self.reminder_count = 0
             self._show_metadata()
         self.view = view
+        valid = {column.key for column in snapshot.columns}
+        self.chart_selection = {key: value for key, value in self.chart_selection.items() if key in valid}
+        self.directory_rules = tuple(item for item in self.directory_rules if item.key in valid)
         self.source_path = snapshot.path
         self.preferred_sheet = snapshot.sheet.key, snapshot.sheet.label
         self.settings.setValue("workbook", str(snapshot.path))
@@ -463,16 +511,23 @@ class Window(QMainWindow):
             self.people.pending.setText(self.t("pending_notice", count=self.n(view.pending)))
             self.options.update_source(view, self.store.backup_path(snapshot.path).exists())
         self._show_combo_count()
+        self._show_permissions()
         self._draw_source()
         self._plan_filter(immediate=True)
         self._update_metadata()
+        self.schedule_reminders()
 
     def _show_metadata(self):
         self.people.set_distinct_values(self.catalog)
         self.reports.set_distinct_values(self.catalog)
+        current, _ = self._layouts(self.view)
+        self.dashboard.set_card_layout(current.get("order", ()), current.get("wide", ()))
         self.dashboard.set_summary(self.summary)
+        self._show_chart_selection()
+        self.people.extra_filters.setVisible(bool(self.directory_rules))
         self.analytics.set_dataset(self.analytics_data, self.analytics_scale, loading=self.view is not None)
         self.attendance.set_dataset(self.analytics_data)
+        self._show_permissions()
 
     def _update_metadata(self):
         if self.metadata_busy:
@@ -481,11 +536,12 @@ class Window(QMainWindow):
         view, today = self.view, QDate.currentDate()
         bindings, scale = self._analysis_preferences(view)
         chart_keys = self._dashboard_chart_keys(view)
+        sensitive = self.account.sees_sensitive
 
         def collect():
             catalog, summary = distinct_values(view), summarize(view, today, chart_keys)
             try:
-                data = load_dataset(view, bindings)
+                data = load_dataset(view, bindings) if sensitive else None
             except Exception as issue:
                 return catalog, summary, None, issue
             return catalog, summary, data, None
@@ -510,7 +566,7 @@ class Window(QMainWindow):
     def _dashboard_chart_keys(self, view):
         if view is None:
             return frozenset()
-        raw = self.settings.value("dashboard/columns/" + namespace(view.snapshot), "[]", str)
+        raw = self.settings.value(self._dashboard_key(view), "[]", str)
         try:
             keys = json.loads(raw)
         except ValueError:
@@ -530,9 +586,229 @@ class Window(QMainWindow):
         checked = dialog.keys()
         keys = [column.key for column in self.view.snapshot.columns if column.key in checked]
         if set(keys) != current:
-            self.settings.setValue("dashboard/columns/" + book_key, json.dumps(keys, ensure_ascii=False))
+            self.settings.setValue(self._dashboard_key(self.view), json.dumps(keys, ensure_ascii=False))
             self.dashboard.chart_to_reveal = next((key for key in keys if key not in current), None)
             self._update_metadata()
+
+    def _session_suffix(self):
+        if self.account.manages:
+            return ""
+        return "/" + sha256(self.account.key.encode()).hexdigest()
+
+    def _dashboard_key(self, view):
+        return "dashboard/columns/" + namespace(view.snapshot) + self._session_suffix()
+
+    def _layouts(self, view):
+        if not view:
+            return {}, {}
+        key = "dashboard/layouts/" + namespace(view.snapshot) + self._session_suffix()
+        try:
+            stored = json.loads(self.settings.value(key, "{}", str))
+        except ValueError:
+            stored = {}
+
+        def clean(layout):
+            return {key: [value for value in layout.get(key, ()) if isinstance(value, str)]
+                    for key in ("order", "wide") if isinstance(layout.get(key), list)} if isinstance(layout, dict) else {}
+
+        current = clean(stored.get("current")) if isinstance(stored, dict) else {}
+        layouts = stored.get("presets") if isinstance(stored, dict) else {}
+        return current, {name: clean(value) for name, value in layouts.items()} if isinstance(layouts, dict) else {}
+
+    def _configure_layout(self):
+        view = self.view
+        if not view:
+            return
+        current, layouts = self._layouts(view)
+        dialog = LayoutDialog(self, view.snapshot.columns, current, layouts, self._dashboard_chart_keys(view))
+        if dialog.exec() != dialog.DialogCode.Accepted or self.view is not view:
+            return
+        name, config = dialog.output
+        if name:
+            layouts[name] = config
+        key = "dashboard/layouts/" + namespace(view.snapshot) + self._session_suffix()
+        self.settings.setValue(key, json.dumps({"current": config, "presets": layouts}, ensure_ascii=False))
+        self.settings.setValue(self._dashboard_key(view), json.dumps(config["order"], ensure_ascii=False))
+        self._clear_chart_selection()
+        self._update_metadata()
+
+    def _select_chart_category(self, key, value):
+        if self.view is None or key not in {column.key for column in self.view.snapshot.columns}:
+            return
+        old = self.chart_selection.get(key)
+        if old is not None and group_key(old) == group_key(value):
+            self.chart_selection.pop(key)
+        else:
+            self.chart_selection[key] = value
+        self._show_chart_selection()
+
+    def _clear_chart_selection(self):
+        self.chart_selection.clear()
+        self._show_chart_selection()
+
+    def _show_chart_selection(self):
+        titles = {column.key: column.title(self.language) for column in self.view.snapshot.columns} if self.view else {}
+        self.dashboard.set_selection(self.chart_selection, titles)
+
+    def _chart_rules(self):
+        return tuple(Rule(key, "group", value) if value else Rule(key, "blank") for key, value in self.chart_selection.items())
+
+    def _open_chart_results(self):
+        if self.view and self.chart_selection:
+            dialog = ResultsDialog(self, self._chart_rules())
+            if dialog.exec() == dialog.DialogCode.Accepted:
+                self.transfer_rules(dialog.rules, dialog.transfer)
+
+    def open_phrase(self):
+        if self.view and self.view.snapshot.columns:
+            dialog = PhraseDialog(self)
+            if dialog.exec() == dialog.DialogCode.Accepted:
+                self.transfer_rules(dialog.rules, dialog.transfer)
+
+    def transfer_rules(self, rules, page):
+        if page == "people":
+            self.people.term.clear()
+            self.people.search_column.setCurrentIndex(0)
+            self.people.select_value(None)
+            self.directory_rules = rules
+            self.people.extra_filters.setVisible(bool(rules))
+        elif page == "reports":
+            for item in tuple(self.reports.editors):
+                self.reports.remove_rule(item, False)
+            self.reports.combine.setCurrentIndex(0)
+            for rule in rules:
+                self.reports.add_rule(rule, False)
+        else:
+            return
+        self.set_page(page)
+        self._plan_filter(immediate=True)
+
+    def clear_directory_rules(self):
+        self.directory_rules = ()
+        self.people.extra_filters.hide()
+        self._plan_filter(immediate=True)
+
+    def _show_permissions(self):
+        manager, editable, sensitive = self.account.manages, self.account.edits, self.account.sees_sensitive
+        available = bool(self.view and self.view.snapshot.columns)
+        self.link_button.setEnabled(manager)
+        self.people.permissions(editable, editable and sensitive, sensitive)
+        self.people.table.empty_action.setEnabled(manager)
+        self.reports.can_export = self.account.exports
+        self.reports.set_busy(self.export_busy)
+        for button_ in self.options.source_actions:
+            button_.setEnabled(manager)
+        if not manager:
+            for control in (self.options.sheet, self.options.backup_button, self.options.reset_button):
+                control.setEnabled(False)
+        self.options.combo_button.setEnabled(manager and available)
+        if not editable:
+            self.analytics.create_button.setEnabled(False)
+        self.attendance.set_permissions(editable and sensitive)
+        self.dashboard.layout_button.setEnabled(available)
+        self.dashboard.meeting_button.setEnabled(available and self.account.exports and not self.export_busy)
+        self.office_page.set_connected(available)
+        self.office_page.set_reminders(self.reminder_count)
+
+    def private_fields(self, view):
+        if not view:
+            return set()
+        key = "office/private/" + namespace(view.snapshot)
+        try:
+            value = json.loads(self.settings.value(key, "[]", str))
+        except ValueError:
+            return set()
+        return {key for key in value if isinstance(key, str)} if isinstance(value, list) else set()
+
+    def change_private_fields(self, keys):
+        if self.account.manages and self.view:
+            scope = namespace(self.view.snapshot)
+            self.settings.setValue("office/private/" + scope, json.dumps(sorted(keys), ensure_ascii=False))
+            self.store.audit(self.actor(), scope, "private_saved", str(len(keys)))
+
+    def actor(self):
+        return self.account.name or self.t("local_guest")
+
+    def with_audit(self, work, action, view=None, detail=""):
+        scope, actor = namespace(view.snapshot) if view else "", self.actor()
+
+        def logged():
+            result = work()
+            try:
+                self.store.audit(actor, scope, action, detail)
+            except (OSError, sqlite3.Error):
+                self.audit_error.emit()
+            return result
+
+        return logged
+
+    def _notify_audit_error(self):
+        QTimer.singleShot(0, self, lambda: self.notify(self.t("audit_error")))
+
+    def open_access(self):
+        if self.account.manages:
+            original = self.account
+            AccountsDialog(self).exec()
+            if self.account != original:
+                self._build()
+
+    def open_audit(self):
+        if self.account.manages:
+            AuditDialog(self).exec()
+
+    def open_dossier(self, selected=None):
+        if self.view and self.account.sees_sensitive:
+            DossierDialog(self, selected if isinstance(selected, str) else None).exec()
+
+    def open_selected_dossier(self):
+        selected = self.people.selected()
+        if selected:
+            self.open_dossier(selected.token)
+
+    def open_reminders(self):
+        if self.view and self.account.sees_sensitive:
+            ReminderDialog(self).exec()
+
+    def open_timekeeping(self):
+        if self.view and self.account.sees_sensitive:
+            TimekeepingDialog(self).exec()
+
+    def open_quality(self):
+        if self.view and self.account.sees_sensitive:
+            QualityDialog(self).exec()
+
+    def schedule_reminders(self):
+        if self.view and self.account.sees_sensitive:
+            self.reminder_timer.start()
+
+    def _refresh_reminders(self):
+        view = self.view
+        if not view or not self.account.sees_sensitive:
+            return
+        if self.reminder_busy:
+            self.schedule_reminders()
+            return
+        self.reminder_busy = True
+        _, lead, dates, required = reminder_settings(self, view)
+        scope, today = namespace(view.snapshot), QDate.currentDate()
+
+        def scan():
+            return len(reminders(view, roster(view), self.office_store.entries(scope, "profile"), today, lead, dates, required))
+
+        def ready(count, error):
+            self.reminder_busy = False
+            if self.view is not view:
+                self.schedule_reminders()
+            elif not error:
+                self.reminder_count = count
+                self.office_page.set_reminders(count)
+                key = "office/notified/" + scope + self._session_suffix()
+                date = today.toString("yyyy-MM-dd")
+                if count and self.settings.value(key, "", str) != date:
+                    self.settings.setValue(key, date)
+                    self.notify(self.t("next_deadlines", number=self.n(count)))
+
+        self.bus.submit(scan, ready)
 
     def _analysis_preferences(self, view):
         if view is None:
@@ -552,7 +828,7 @@ class Window(QMainWindow):
 
     def _configure_analytics(self):
         view = self.view
-        if view is None:
+        if view is None or not self.account.sees_sensitive:
             return
         bindings, scale = self._analysis_preferences(view)
         dialog = SourceDialog(self, self.language, view.snapshot.columns, bindings, scale)
@@ -591,7 +867,7 @@ class Window(QMainWindow):
 
     def _create_profile_sheet(self):
         data = self.analytics_data
-        if data is None or data.profiles is not None:
+        if data is None or data.profiles is not None or not self.account.edits or not self.account.sees_sensitive:
             return
         snapshot = data.view.snapshot
 
@@ -603,11 +879,11 @@ class Window(QMainWindow):
             self._apply(view)
             self.notify(insight_text(self.language, "profile_created"))
 
-        self._run_write(write, saved, expected=data.view)
+        self._run_write(self.with_audit(write, "logged_profile", data.view), saved, expected=data.view)
 
     def _attendance_dialog(self, operation):
         data = self.analytics_data
-        if data is None or self.write_busy:
+        if data is None or self.write_busy or not self.account.edits or not self.account.sees_sensitive:
             return
         event = self.attendance.selected() if operation != "add" else None
         if operation != "add" and event is None:
@@ -631,7 +907,8 @@ class Window(QMainWindow):
                 def deleted(view):
                     self._apply(view)
                     self.notify(t("attendance_deleted"))
-                self._run_write(lambda: write((None, None, "", ""), delete=True), deleted, expected=data.view)
+                self._run_write(self.with_audit(lambda: write((None, None, "", ""), delete=True), "logged_sport", data.view),
+                                deleted, expected=data.view)
             return
 
         dialog = AttendanceDialog(self, self.language, self.colors, data, event)
@@ -641,7 +918,8 @@ class Window(QMainWindow):
                 self._apply(view)
                 self.notify(t("attendance_saved"))
                 dialog.accept()
-            self._run_write(lambda: write(request), saved, dialog.failed, expected=data.view)
+            self._run_write(self.with_audit(lambda: write(request), "logged_sport", data.view),
+                            saved, dialog.failed, expected=data.view)
 
         dialog.submitted.connect(submitted)
         dialog.exec()
@@ -666,7 +944,7 @@ class Window(QMainWindow):
 
     def configure_combos(self):
         view = self.view
-        if not view or not view.snapshot.columns:
+        if not view or not view.snapshot.columns or not self.account.manages:
             return
         columns = view.snapshot.columns
         dialog = ColumnsDialog(self, self.language, columns, self._combo_keys(view), title=self.t("combo_setup"))
@@ -706,6 +984,7 @@ class Window(QMainWindow):
     def _sync(self):
         if self.view and self.metadata_date != QDate.currentDate():
             self._update_metadata()
+            self.schedule_reminders()
         if not self.source_path or self.sync_busy or self.write_busy:
             return
         active = self.view.snapshot if self.view else None
@@ -751,11 +1030,15 @@ class Window(QMainWindow):
         self.bus.submit(load, done)
 
     def choose_file(self):
+        if not self.account.manages:
+            return
         selected, _ = QFileDialog.getOpenFileName(self, self.t("open_source"), str(self.source_path or ""), "Excel (*.xlsx)")
         if selected:
             self._load(Path(selected), manual=True)
 
     def create_file(self):
+        if not self.account.manages:
+            return
         destination, _ = QFileDialog.getSaveFileName(self, self.t("blank_workbook"), "Personnel.xlsx", "Excel (*.xlsx)")
         if not destination:
             return
@@ -765,6 +1048,8 @@ class Window(QMainWindow):
         self._run_write(lambda: make_template(path), lambda _: self._load(path, manual=True))
 
     def choose_sheet(self):
+        if not self.account.manages:
+            return
         selected = self.options.sheet.currentData()
         chosen = selected, self.options.sheet.currentText()
         if self.source_path and selected and chosen != self.preferred_sheet:
@@ -788,7 +1073,7 @@ class Window(QMainWindow):
         order, reverse = self.people.current_sort, self.people.sort_reverse
         rules, any_match = self.reports.rule_values(), self.reports.combine.currentData()
         exact = self.people.filter_rule()
-        directory_rules = (exact,) if exact is not None else ()
+        directory_rules = self.directory_rules + ((exact,) if exact is not None else ())
 
         def filter_all():
             directory = filter_records(records, columns, term, search, rules=directory_rules, sort_key=order, reverse=reverse)
@@ -809,6 +1094,8 @@ class Window(QMainWindow):
         self.bus.submit(filter_all, show)
 
     def _record(self, operation):
+        if not self.account.edits or operation == "delete" and not self.account.sees_sensitive:
+            return
         if self.record_dialog is not None:
             if self.record_dialog.isMinimized():
                 self.record_dialog.showNormal()
@@ -820,6 +1107,10 @@ class Window(QMainWindow):
             return
         record = self.people.selected() if operation != "add" else None
         if operation != "add" and (not record or not any(item is record for item in view.records)):
+            return
+        raw = self.source_view
+        source = next((item for item in raw.records if item.token == record.token), None) if record else None
+        if record and source is None:
             return
         choices = {key: self.catalog.get(key, ()) for key in self._combo_keys(view)}
         dialog = RecordDialog(self, self.language, view.snapshot.columns, record, operation,
@@ -834,21 +1125,28 @@ class Window(QMainWindow):
             if view is not self.view:
                 dialog.failed(self.t("source_changed"))
                 return
+            if values.keys() - {column.key for column in view.snapshot.columns}:
+                dialog.failed(self.t("access_denied"))
+                return
+
             def apply():
                 if target == "local":
-                    return self.store.change(view, operation, record, values)
-                snapshot = view.snapshot
-                row = record.source.number if record and record.source else None
+                    return self.store.change(raw, operation, source, values)
+                snapshot = raw.snapshot
+                row = source.source.number if source and source.source else None
                 verb = "add" if row is None and operation == "edit" else operation
                 updated = update_workbook(snapshot, verb, row, values, lambda payload: self.store.backup(snapshot.path, payload))
-                return self.store.finish_source_change(updated, record, verb, values)
+                return self.store.finish_source_change(updated, source, verb, values)
 
             def finished(new_view):
                 self._apply(new_view, reading=target == "excel")
                 self.notify(self.t("saved_excel" if target == "excel" else "saved_local"))
                 dialog.accept()
 
-            self._run_write(apply, finished, dialog.failed, expected=view)
+            fields = tuple(column.title(self.language) for column in view.snapshot.columns if column.key in values)
+            detail = " · ".join((record.token if record else target, *fields))
+            self._run_write(self.with_audit(apply, "logged_" + operation, view, detail),
+                            finished, dialog.failed, expected=view)
         dialog.submitted.connect(commit)
         dialog.finished.connect(close_dialog)
         dialog.show()
@@ -888,14 +1186,16 @@ class Window(QMainWindow):
         box.exec()
 
     def restore_record(self):
+        if not self.account.edits or not self.account.sees_sensitive:
+            return
         record = self.people.selected()
         if record and record.overlay and self.view and any(item is record for item in self.view.records):
             snapshot = self.view.snapshot
-            self._run_write(lambda: self.store.clear_record(snapshot, record),
+            self._run_write(self.with_audit(lambda: self.store.clear_record(snapshot, record), "logged_restore", self.view, record.token),
                             lambda view: self._apply(view, False), expected=self.view)
 
     def reset_local(self):
-        if not self.view:
+        if not self.view or not self.account.manages:
             return
         box = QMessageBox(QMessageBox.Icon.Question, self.t("reset_local"), self.t("reset_question"), parent=self)
         confirm = box.addButton(self.t("reset_local"), QMessageBox.ButtonRole.AcceptRole)
@@ -907,7 +1207,7 @@ class Window(QMainWindow):
             def finished(view):
                 self._apply(view, False)
                 self.notify(self.t("local_reset"))
-            self._run_write(lambda: self.store.clear(snapshot), finished, expected=self.view)
+            self._run_write(self.with_audit(lambda: self.store.clear(snapshot), "logged_restore", self.view), finished, expected=self.view)
 
     @staticmethod
     def _extension(path, suffix):
@@ -925,7 +1225,7 @@ class Window(QMainWindow):
         return True
 
     def copy_backup(self):
-        if not self.view:
+        if not self.view or not self.account.manages:
             return
         path = self.view.snapshot.path
         choice, _ = QFileDialog.getSaveFileName(self, self.t("backup"), f"{path.stem}-recovery.xlsx", "Excel (*.xlsx)")
@@ -937,7 +1237,7 @@ class Window(QMainWindow):
     def export_report(self):
         view = self.view
         selected, projection = self.reports.projection()
-        if not view or not selected or not self.reports.complete_rules() or self.export_busy:
+        if not view or not selected or not self.reports.complete_rules() or self.export_busy or not self.account.exports:
             return
         extension = self.reports.format.currentData()
         title = self.reports.title.text().strip() or self.t("report_default")
@@ -966,7 +1266,51 @@ class Window(QMainWindow):
             self.reports.set_busy(False)
             self.notify(self._reason(error) if error else self.t("exported"))
 
-        self.bus.submit(work, done)
+        self.bus.submit(self.with_audit(work, "logged_export", view, title), done)
+
+    def export_meeting(self):
+        view = self.view
+        if not view or self.export_busy or not self.account.exports:
+            return
+        settings = meeting_settings(self)
+        if not settings or self.view is not view:
+            return
+        begin, end, column = settings
+        folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        choice, _ = QFileDialog.getSaveFileName(self, self.t("meeting"), str(Path(folder) / "Niro-Meeting.zip"), "ZIP (*.zip)")
+        if not choice:
+            return
+        path = self._extension(Path(choice), ".zip")
+        if not self._destination_allowed(path):
+            return
+        language, colors = self.language, self.colors
+        selection, keys = self._chart_rules(), self._dashboard_chart_keys(view)
+        self.export_busy = True
+        self._show_permissions()
+        self.notify(self.t("working_export"), False)
+
+        def completed(result, problem):
+            self.export_busy = False
+            self._show_permissions()
+            self.notify(self._reason(problem) if problem else self.t("exported"))
+
+        def prepared(result, problem):
+            if problem:
+                completed(None, problem)
+                return
+            summary, rows = result
+            try:
+                pictures = pack_charts(summary, language, colors)
+            except Exception as error:
+                completed(None, error)
+                return
+
+            def export_files():
+                export_pack(path, view.snapshot.columns, rows, summary, pictures, language, begin, end, column, selection)
+
+            self.bus.submit(self.with_audit(export_files, "meeting_saved", view, path.name), completed)
+
+        self.bus.submit(lambda: prepare_pack(view, keys, selection, begin, end, column), prepared)
 
     def closeEvent(self, event):
         if self.export_busy or self.write_busy:
@@ -974,5 +1318,6 @@ class Window(QMainWindow):
             event.ignore()
         else:
             self.sync_timer.stop()
+            self.reminder_timer.stop()
             self._finish_transition()
             event.accept()

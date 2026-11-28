@@ -5,12 +5,12 @@ from decimal import Decimal, InvalidOperation
 import re
 
 from .state import Record
-from .workbook import Column, normalize
+from .workbook import Column, group_key, normalize
 
 
 OPERATORS = (
     "contains", "not_contains", "equals", "not_equals", "starts", "ends",
-    "greater", "at_least", "less", "at_most", "between", "blank", "not_blank",
+    "greater", "at_least", "less", "at_most", "between", "calendar_between", "group", "blank", "not_blank",
 )
 NO_VALUE = {"blank", "not_blank"}
 DATE = re.compile(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$")
@@ -49,6 +49,8 @@ def _match(value: str, operator: str, query: str, upper: str) -> bool:
         return query not in value
     if operator == "equals":
         return value == query
+    if operator == "group":
+        return group_key(value) == group_key(query)
     if operator == "not_equals":
         return value != query
     if operator == "starts":
@@ -57,6 +59,11 @@ def _match(value: str, operator: str, query: str, upper: str) -> bool:
         return value.endswith(query)
     if not value:
         return False
+    if operator == "calendar_between":
+        from .record_fields import date_from_text
+
+        current, start, end = map(date_from_text, (value, query, upper))
+        return current.isValid() and start.isValid() and end.isValid() and start <= current <= end
     left, right = comparable(value), comparable(query)
     if left[0] != right[0]:
         return False

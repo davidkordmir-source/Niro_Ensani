@@ -65,7 +65,7 @@ def _text(value: str) -> str:
     return escape(BAD_TEXT.sub("", value))
 
 
-def export(report: Report, destination: Path) -> None:
+def export(report: Report, destination: Path, *, data_only=False) -> None:
     suffix = destination.suffix.lower()
     if suffix not in DOC_TYPES:
         raise ValueError("Unsupported report extension")
@@ -76,7 +76,10 @@ def export(report: Report, destination: Path) -> None:
     temporary = Path(filename)
     try:
         writers = {".xlsx": _xlsx, ".docx": _docx, ".pptx": _pptx, ".csv": _csv}
-        writers[suffix](report, temporary)
+        if data_only and suffix == ".xlsx":
+            _xlsx(report, temporary, cover=False)
+        else:
+            writers[suffix](report, temporary)
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)
@@ -94,7 +97,7 @@ def _csv(report: Report, path: Path) -> None:
         writer.writerows(tuple(map(cell, row)) for row in report.rows)
 
 
-def _xlsx(report: Report, path: Path) -> None:
+def _xlsx(report: Report, path: Path, *, cover=True) -> None:
     import xlsxwriter
 
     palette = PALETTES[report.style]
@@ -110,7 +113,8 @@ def _xlsx(report: Report, path: Path) -> None:
         header = fmt(bold=True, text_wrap=True, bg_color="#" + palette.accent, font_color="white")
         even = fmt(text_wrap=True, bg_color="#" + palette.paper, font_color="#" + palette.ink, num_format="@")
         odd = fmt(text_wrap=True, bg_color="#" + palette.band, font_color="#" + palette.ink, num_format="@")
-        sheet_size = 1_048_573
+        header_row = 2 if cover else 0
+        sheet_size = 1_048_575 - header_row
         iterator = iter(report.rows)
         tab = "گزارش" if report.rtl else "Report"
         for batch in range(max(1, (len(report.rows) + sheet_size - 1) // sheet_size)):
@@ -118,22 +122,23 @@ def _xlsx(report: Report, path: Path) -> None:
             if report.rtl:
                 sheet.right_to_left()
             sheet.hide_gridlines(2)
-            sheet.freeze_panes(3, 0)
-            sheet.set_row(0, 35, title)
-            sheet.set_row(1, 24, summary)
-            sheet.set_row(2, 34, header)
-            sheet.merge_range(0, 0, 0, max(1, len(report.headings) - 1), report.title, title)
-            sheet.write_string(1, 0, report.count_text, summary)
+            sheet.freeze_panes(header_row + 1, 0)
+            sheet.set_row(header_row, 34, header)
+            if cover:
+                sheet.set_row(0, 35, title)
+                sheet.set_row(1, 24, summary)
+                sheet.merge_range(0, 0, 0, max(1, len(report.headings) - 1), report.title, title)
+                sheet.write_string(1, 0, report.count_text, summary)
             for column, heading in enumerate(report.headings):
                 sheet.set_column(column, column, min(37, max(18, 6 + len(heading))))
-                sheet.write_string(2, column, heading, header)
-            last = 2
-            for last, values in enumerate(islice(iterator, sheet_size), start=3):
+                sheet.write_string(header_row, column, heading, header)
+            last = header_row
+            for last, values in enumerate(islice(iterator, sheet_size), start=header_row + 1):
                 style = even if last % 2 else odd
                 for column, value in enumerate(values):
                     sheet.write_string(last, column, value, style)
-            if last > 2:
-                sheet.autofilter(2, 0, last, len(report.headings) - 1)
+            if last > header_row:
+                sheet.autofilter(header_row, 0, last, len(report.headings) - 1)
 
 
 def _word_para(text: str, report: Report, color: str, size: int, bold: bool = False) -> str:
