@@ -61,7 +61,7 @@ def _self_test(app, system_font, output):
     from PySide6.QtCore import QDate
     from PySide6.QtWidgets import QComboBox
 
-    from .insights import Query, evaluate, load_dataset, prepare_profile, save_attendance
+    from .insights import load_dataset, prepare_profile, save_attendance
     from .record_fields import DateField, GREGORIAN, JALALI, _DatePicker
     from .reports import Report, export
     from .schema import PROFILE_SHEET
@@ -100,6 +100,7 @@ def _self_test(app, system_font, output):
         for extension in (".xlsx", ".docx", ".pptx", ".csv"):
             export(report, root / (extension[1:] + "-report" + extension))
         settings = QSettings(str(root / "preferences.ini"), QSettings.Format.IniFormat)
+        settings.setValue("analytics/metrics", "department,leave,sport")
         window = Window(store, settings, system_font, database, watch_interval=150)
         window.show()
         checks = QTimer()
@@ -107,6 +108,11 @@ def _self_test(app, system_font, output):
         result = []
         def check():
             if window.people.table.model.rowCount() != 1 or window.catalog.get(city) != ("تهران",):
+                return
+            if window.page_key != "analytics":
+                window.set_page("analytics", animate=False)
+                return
+            if "sport" not in window.analytics.cards:
                 return
             checks.stop()
             try:
@@ -118,17 +124,18 @@ def _self_test(app, system_font, output):
                 assert window.attendance.model.rows[0].status == "present"
                 assert window.analytics_data.profiles is not None
 
-                window.set_page("analytics", animate=False)
-                query = Query("fa", ("department", "leave", "sport"), today.addYears(-2), today, today)
-                analytics = evaluate(window.analytics_data, query)
-                window.analytics.present(analytics)
                 assert window.analytics.cards["department"].headline.text() == "۱ نفر"
                 assert window.analytics.cards["leave"].headline.text() == "۲ بار"
                 assert window.analytics.cards["sport"].headline.text() == "۱۰۰٪"
                 panel = window.analytics.cards["department"].chart
+                assert panel.isVisible() and not panel.size().isEmpty(), panel.size()
                 for mode in ("bar", "line", "area", "ring", "table"):
-                    panel.types.setCurrentIndex(panel.types.findData(mode))
-                    assert panel.types.currentData() == mode and not panel.grab().isNull()
+                    index = panel.types.findData(mode)
+                    assert index >= 0, f"Missing chart mode {mode}"
+                    panel.types.setCurrentIndex(index)
+                    display = panel.table if mode == "table" else panel.plot
+                    assert panel.stack.currentWidget() is display, f"Chart mode {mode} did not switch its view"
+                    assert not panel.grab().isNull(), f"Chart mode {mode} could not render at {panel.size()}"
                 assert window.analytics.compare_chart.data.table_only
 
                 window.dashboard.selector.setCurrentIndex(window.dashboard.selector.findData(90))
@@ -183,7 +190,7 @@ def _self_test(app, system_font, output):
         QTimer.singleShot(10000, app.quit)
         app.exec()
         if not result:
-            return 1
+            raise RuntimeError(f"Timed out at {window.page_key}: {window.analytics.status.text()}")
         if result[0] is not True:
             raise result[0]
         if output is not None:
