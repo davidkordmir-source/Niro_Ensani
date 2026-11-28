@@ -9,7 +9,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QIcon, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget,
+    QComboBox, QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
     QListWidgetItem, QPlainTextEdit, QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
     QTableView, QVBoxLayout, QWidget,
 )
@@ -18,6 +18,7 @@ from .filters import NO_VALUE, OPERATORS, Rule
 from .locale import number, translate
 from .theme import ASSETS
 from .visuals import artwork_width, brandmark, draw_banner
+from .workbook import normalize
 
 
 def label(text: str = "", style: str = "", wrap: bool = False) -> QLabel:
@@ -83,6 +84,39 @@ class ComboBox(QComboBox):
 
     def wheelEvent(self, event):
         event.ignore()
+
+
+class CardGrid(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.cards = ()
+        self.columns = 0
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(12)
+
+    def show_cards(self, cards):
+        cards = tuple(cards)
+        if cards != self.cards:
+            self.cards = cards
+            self.columns = 0
+            self._place()
+
+    def resizeEvent(self, event):
+        self._place()
+        super().resizeEvent(event)
+
+    def _place(self):
+        columns = 2 if self.width() >= 780 and len(self.cards) > 1 else 1
+        if self.columns == columns:
+            return
+        self.columns = columns
+        while self.grid.count():
+            self.grid.takeAt(0)
+        self.grid.setColumnStretch(0, 1)
+        self.grid.setColumnStretch(1, int(columns == 2))
+        for index, widget in enumerate(self.cards):
+            self.grid.addWidget(widget, index // columns, index % columns)
 
 
 def fill_options(combo: QComboBox, options, value=None) -> None:
@@ -589,7 +623,7 @@ class RuleEditor(QFrame):
 
 
 class ColumnsDialog(QDialog):
-    def __init__(self, parent, language, columns, selected, *, title=None):
+    def __init__(self, parent, language, columns, selected, *, title=None, search_placeholder=None):
         super().__init__(parent)
         t = lambda key: translate(language, key)
         title = title or t("choose_columns")
@@ -603,6 +637,13 @@ class ColumnsDialog(QDialog):
             item = QListWidgetItem(column.title(language), self.list)
             item.setData(Qt.ItemDataRole.UserRole, column.key)
             item.setCheckState(Qt.CheckState.Checked if column.key in selected else Qt.CheckState.Unchecked)
+        if search_placeholder:
+            self.search = QLineEdit()
+            self.search.setPlaceholderText(search_placeholder)
+            self.search.setAccessibleName(search_placeholder)
+            self.search.setClearButtonEnabled(True)
+            self.search.textChanged.connect(self._filter_columns)
+            layout.addWidget(self.search)
         controls = row_layout()
         all_fields = button(t("all"))
         none = button(t("none"))
@@ -623,9 +664,18 @@ class ColumnsDialog(QDialog):
         cancel.clicked.connect(self.reject)
         apply.clicked.connect(self.accept)
 
+    def _filter_columns(self, text):
+        term = normalize(text)
+        for index in range(self.list.count()):
+            item = self.list.item(index)
+            column = item.data(Qt.ItemDataRole.UserRole)
+            item.setHidden(term not in normalize(item.text()) and term not in normalize(column))
+
     def _choose(self, value):
         for index in range(self.list.count()):
-            self.list.item(index).setCheckState(value)
+            item = self.list.item(index)
+            if not item.isHidden():
+                item.setCheckState(value)
 
     def keys(self):
         return {self.list.item(index).data(Qt.ItemDataRole.UserRole) for index in range(self.list.count())

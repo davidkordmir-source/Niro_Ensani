@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtWidgets import (
-    QDialog, QFormLayout, QGridLayout, QScrollArea, QVBoxLayout, QWidget,
+    QDialog, QFormLayout, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from .insight_charts import ChartPanel
@@ -10,7 +10,7 @@ from .insights import FIELD_NAMES, GROUPS, METRICS, Query, date_label, format_va
 from .locale import translate
 from .pages import _scroll
 from .record_fields import DateField, date_from_text
-from .widgets import ColumnsDialog, ComboBox, button, card, field, fill_options, icon, label, row_layout, section_header
+from .widgets import CardGrid, ColumnsDialog, ComboBox, button, card, field, fill_options, icon, label, row_layout, section_header
 from .workbook import Column
 
 
@@ -86,37 +86,6 @@ class _MetricCard(QWidget):
         self.chart.set_data(result.chart)
 
 
-class _MetricGrid(QWidget):
-    def __init__(self):
-        super().__init__()
-        self.cards = ()
-        self.columns = 0
-        self.grid = QGridLayout(self)
-        self.grid.setContentsMargins(0, 0, 0, 0)
-        self.grid.setSpacing(12)
-
-    def show_cards(self, cards):
-        self.cards = tuple(cards)
-        self.columns = 0
-        self._place()
-
-    def resizeEvent(self, event):
-        self._place()
-        super().resizeEvent(event)
-
-    def _place(self):
-        columns = 2 if self.width() >= 780 and len(self.cards) > 1 else 1
-        if self.columns == columns:
-            return
-        self.columns = columns
-        while self.grid.count():
-            self.grid.takeAt(0)
-        self.grid.setColumnStretch(0, 1)
-        self.grid.setColumnStretch(1, int(columns == 2))
-        for index, widget in enumerate(self.cards):
-            self.grid.addWidget(widget, index // columns, index % columns)
-
-
 class AnalyticsPage(QWidget):
     changed = Signal()
     configure = Signal()
@@ -183,7 +152,7 @@ class AnalyticsPage(QWidget):
         box.addWidget(self.compare_chart)
         self.comparison.hide()
         layout.addWidget(self.comparison)
-        self.grid = _MetricGrid()
+        self.grid = CardGrid()
         layout.addWidget(self.grid)
         layout.addStretch(1)
 

@@ -5,6 +5,8 @@ STRINGS = {
     "product": ("دفتر منابع انسانی", "People operations"),
     "workspace": ("فضای کاری", "Workspace"),
     "dashboard": ("داشبورد", "Dashboard"),
+    "dashboard_columns": ("انتخاب ستون‌های نمودار", "Choose chart columns"),
+    "search_columns": ("جست‌وجوی ستون‌ها…", "Find a column…"),
     "analytics": ("تحلیل و مقایسه", "Analytics"),
     "attendance": ("حضور تربیت بدنی", "Sport attendance"),
     "companion_exists": ("شیت تکمیلی با این نام در بانک وجود دارد. اگر پنهان است، آن را در اکسل نمایش دهید.", "This companion sheet already exists. Unhide it in Excel if necessary."),

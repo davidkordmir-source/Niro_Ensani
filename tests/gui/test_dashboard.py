@@ -54,3 +54,22 @@ class WorkforceTests(unittest.TestCase):
         self.assertEqual(sum(result.periods[0].departures), 0)
         self.assertEqual(result.departures_by_status, 0)
         self.assertIsNone(summarize(None, self.today).total)
+
+    def test_counts_selected_columns_from_the_current_view(self):
+        data = view(("مدیریت", "Employment Status", "Type"), (
+            ("اداره مالی", "Active", "پیمانی"),
+            ("اداره   مالی ", "Left", "رسمی"),
+            ("", "Active", ""),
+            ("کنترل", "", "پيمانی"),
+        ))
+        result = summarize(data, self.today, ("2", "1", "0", "removed_column"))
+        department, status, membership = result.charts
+        self.assertEqual([column.key for column, _ in result.charts], ["0", "1", "2"])
+        self.assertEqual(dict(department[1]), {"اداره مالی": 2, "کنترل": 1, None: 1})
+        self.assertIs(status[1], result.statuses)
+        self.assertEqual(dict(membership[1]), {"پیمانی": 2, "رسمی": 1, None: 1})
+
+    def test_selected_column_is_available_on_an_empty_sheet(self):
+        data = view(("Team",), ())
+        result = summarize(data, self.today, ("0",))
+        self.assertEqual(result.charts, ((data.snapshot.columns[0], ()),))

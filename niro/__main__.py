@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -14,7 +15,7 @@ from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import QApplication, QMessageBox, QProgressBar, QVBoxLayout, QWidget
 
 from .locale import translate
-from .state import Store
+from .state import Store, namespace
 from .theme import ASSETS, FONT_NAMES, THEMES, interface_font, load_fonts, style
 from .widgets import label
 from .window import Window
@@ -102,6 +103,7 @@ def _self_test(app, system_font, output):
             export(report, root / (extension[1:] + "-report" + extension))
         settings = QSettings(str(root / "preferences.ini"), QSettings.Format.IniFormat)
         settings.setValue("analytics/metrics", "department,leave,sport")
+        settings.setValue("dashboard/columns/" + namespace(view.snapshot), json.dumps([city, marital]))
         window = Window(store, settings, system_font, database, watch_interval=150)
         window.show()
         checks = QTimer()
@@ -124,6 +126,11 @@ def _self_test(app, system_font, output):
                 assert window.attendance.model.rowCount() == 1
                 assert window.attendance.model.rows[0].status == "present"
                 assert window.analytics_data.profiles is not None
+                assert window.dashboard.chart_button.isEnabled()
+                dashboard_charts = window.dashboard.chart_cards
+                assert set(dashboard_charts) == {city, marital}
+                assert dashboard_charts[city].model.counts == (("تهران", 1),)
+                assert dashboard_charts[marital].donut.total == 1
 
                 assert window.analytics.cards["department"].headline.text() == "۱ نفر"
                 assert window.analytics.cards["leave"].headline.text() == "۲ بار"
@@ -162,6 +169,7 @@ def _self_test(app, system_font, output):
                     window.set_page("dashboard", animate=False)
                     assert window.dashboard.showcase.isVisible()
                     assert window.dashboard.selector.currentData() == 90
+                    assert dashboard_charts[city].donut.palette == window.colors
                     assert not window.dashboard.grab().isNull()
                 window.set_page("settings", animate=False)
                 font_choice = window.options.font_choice

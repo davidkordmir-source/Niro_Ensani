@@ -7,17 +7,20 @@ from dataclasses import dataclass
 from math import ceil, floor, log10
 import unicodedata
 
-from PySide6.QtCore import QCalendar, QDate, QEasingCurve, QEvent, QPointF, QRectF, Qt, QVariantAnimation
+from PySide6.QtCore import (
+    QAbstractTableModel, QCalendar, QDate, QEasingCurve, QEvent, QModelIndex, QPointF, QRectF, QTimer, Qt, Signal,
+    QVariantAnimation,
+)
 from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QBoxLayout, QFrame, QScrollArea, QToolTip, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QBoxLayout, QDialog, QFrame, QHeaderView, QScrollArea, QTableView, QToolTip, QVBoxLayout, QWidget
 
-from .locale import PERSIAN_DIGITS, number
+from .locale import PERSIAN_DIGITS, number, translate
 from .record_fields import date_from_text
 from .state import View
 from .theme import linear_fill
 from .visuals import artwork_width, draw_banner
-from .widgets import ComboBox, ElidedLabel, card, fill_options, icon, label, row_layout, section_header
-from .workbook import normalize
+from .widgets import CardGrid, ComboBox, ElidedLabel, button, card, escaped_tooltip, fill_options, icon, label, row_layout, section_header
+from .workbook import Column, normalize
 
 
 COPY = {
@@ -49,6 +52,12 @@ COPY = {
     "unlinked": ("برای دیدن آمار، بانک اکسل را متصل کنید.", "Connect an Excel workbook to view your analytics."),
     "unspecified": ("ثبت‌نشده", "Unspecified"),
     "other": ("سایر وضعیت‌ها", "Other statuses"),
+    "charts": ("نمودارهای داشبورد", "Dashboard charts"),
+    "choose_charts": ("انتخاب نمودارها", "Choose charts"),
+    "other_values": ("سایر مقادیر", "Other values"),
+    "all_values": ("همهٔ مقادیر", "All values"),
+    "value": ("مقدار", "Value"),
+    "count": ("تعداد", "Count"),
 }
 
 
@@ -76,6 +85,7 @@ _DEPARTED = frozenset(map(_key, (
 )))
 _EMPLOYED = frozenset(map(_key, ("شاغل", "فعال", "active", "employed")))
 _PERIODS = ((30, 7), (90, 15), (365, 61))
+Distribution = tuple[tuple[str | None, int], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,14 +104,27 @@ class Period:
 @dataclass(frozen=True, slots=True)
 class DashboardSummary:
     total: int | None
-    statuses: tuple[tuple[str | None, int], ...] | None
+    statuses: Distribution | None
     departures_by_status: int | None
     undated_departures: int
     periods: tuple[Period, ...]
+    charts: tuple[tuple[Column, Distribution], ...] = ()
 
 
-def summarize(view: View | None, today: QDate | None = None) -> DashboardSummary:
-    """Summarize the workbook in one pass. Call off the UI thread for large sheets."""
+def _distribution(records, index: int) -> Distribution:
+    raw = Counter(record.values[index] for record in records)
+    counts = Counter()
+    labels = {"": None}
+    for value, amount in raw.items():
+        spelling = value.strip()
+        key = _key(spelling)
+        counts[key] += amount
+        labels.setdefault(key, spelling)
+    return tuple((labels[key], counts[key]) for key in sorted(counts, key=lambda key: (-counts[key], key)))
+
+
+def summarize(view: View | None, today: QDate | None = None, chart_keys=()) -> DashboardSummary:
+    """Calculate the dashboard from the current personnel view on a worker thread."""
     today = today or QDate.currentDate()
     records = view.records if view else ()
     labels = {}
@@ -160,9 +183,14 @@ def summarize(view: View | None, today: QDate | None = None) -> DashboardSummary
     )
     order = sorted(statuses, key=lambda name: (-statuses[name], name))
     distribution = tuple((display[name], statuses[name]) for name in order)
+    chosen = frozenset(chart_keys)
+    charts = tuple(
+        (column, distribution if index == status_column else _distribution(records, index))
+        for index, column in enumerate(view.snapshot.columns) if column.key in chosen
+    ) if view and chosen else ()
     return DashboardSummary(len(records) if view is not None else None,
                             distribution if status_column is not None else None,
-                            marked if any(order) or not records and status_column is not None else None, undated, periods)
+                            marked if any(order) or not records and status_column is not None else None, undated, periods, charts)
 
 
 def _date(language, date, full=False):
@@ -535,18 +563,18 @@ class _Donut(_AnimatedChart):
         painter.drawText(ring, Qt.AlignmentFlag.AlignCenter, number(self.language, self.total))
 
 
-class _StatusComposition(QWidget):
+class _DistributionComposition(QWidget):
     def __init__(self, donut, legend):
         super().__init__()
-        self.decorated = False
+        self.allow_columns = False
         self.content = QBoxLayout(QBoxLayout.Direction.TopToBottom, self)
         self.content.setContentsMargins(0, 0, 0, 0)
         self.content.setSpacing(12)
         self.content.addWidget(donut, 1)
         self.content.addWidget(legend, 1)
 
-    def set_graphic(self, enabled):
-        self.decorated = enabled
+    def set_side_by_side(self, enabled):
+        self.allow_columns = enabled
         self._orient()
 
     def resizeEvent(self, event):
@@ -554,12 +582,163 @@ class _StatusComposition(QWidget):
         super().resizeEvent(event)
 
     def _orient(self):
-        side_by_side = self.decorated and self.width() >= 318
+        side_by_side = self.allow_columns and self.width() >= 318
         direction = QBoxLayout.Direction.RightToLeft if side_by_side else QBoxLayout.Direction.TopToBottom
         self.content.setDirection(direction)
 
 
+class _DistributionModel(QAbstractTableModel):
+    def __init__(self, language, parent):
+        super().__init__(parent)
+        self.language = language
+        self.counts: Distribution = ()
+
+    def set_counts(self, counts):
+        self.beginResetModel()
+        self.counts = counts
+        self.endResetModel()
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.counts)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else 2
+
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if orientation == Qt.Orientation.Horizontal and role == Qt.ItemDataRole.DisplayRole and 0 <= section < 2:
+            return _text(self.language, ("value", "count")[section])
+        return None
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if not index.isValid() or role not in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.ToolTipRole):
+            return None
+        name, count = self.counts[index.row()]
+        value = number(self.language, count) if index.column() else name or _text(self.language, "unspecified")
+        return escaped_tooltip(value) if role == Qt.ItemDataRole.ToolTipRole else value
+
+
+class _DistributionCard(QWidget):
+    def __init__(self, language, palette, title, *, employment=False):
+        super().__init__()
+        self.language = language
+        self.employment = employment
+        self.total = 0
+        self.model = _DistributionModel(language, self)
+        shell = QVBoxLayout(self)
+        shell.setContentsMargins(0, 0, 0, 0)
+        frame, body = card()
+        shell.addWidget(frame)
+        if not employment:
+            self.setMinimumHeight(254)
+
+        heading = row_layout(8)
+        self.title = ElidedLabel("sectionTitle")
+        self.title.setText(title)
+        self.details = button(_text(language, "all_values"))
+        self.details.clicked.connect(self._show_values)
+        self.details.hide()
+        heading.addWidget(self.title, 1)
+        heading.addWidget(self.details)
+        body.addLayout(heading)
+        self.hint = label("", "smallMuted", True)
+        self.hint.hide()
+        body.addWidget(self.hint)
+        self.donut = _Donut(language, palette)
+        legend = QWidget()
+        legend_body = QVBoxLayout(legend)
+        legend_body.setContentsMargins(0, 0, 0, 0)
+        legend_body.addStretch()
+        self.legend = QVBoxLayout()
+        self.legend.setSpacing(6)
+        legend_body.addLayout(self.legend)
+        legend_body.addStretch()
+        self.composition = _DistributionComposition(self.donut, legend)
+        self.composition.hide()
+        body.addWidget(self.composition, 1)
+        self.recolor(palette)
+
+    def present(self, counts, total, hint, *, title=None):
+        if title is not None:
+            self.title.setText(title)
+        self.hint.setText(hint)
+        self.hint.setVisible(bool(hint) and not counts)
+        self.composition.setVisible(bool(counts))
+        self.details.setVisible(len(counts) > 5)
+        self.donut.setAccessibleName(f"{self.title.full_text} · {number(self.language, total)}")
+        if counts is not self.model.counts or self.total != total:
+            self.model.set_counts(counts)
+            self.total = total
+            self._draw_distribution()
+
+    def recolor(self, palette):
+        self.palette = palette
+        self.donut.recolor(palette)
+        self.composition.set_side_by_side(palette.graphic is not None or not self.employment)
+        self._draw_distribution()
+
+    def _draw_distribution(self):
+        while self.legend.count():
+            member = self.legend.takeAt(0).widget()
+            member.hide()
+            member.deleteLater()
+        counts = self.model.counts
+        groups = [(name or _text(self.language, "unspecified"), amount, _key(name) if self.employment and name else "")
+                  for name, amount in counts[:5]]
+        if len(counts) > 5:
+            remainder = self.total - sum(amount for _, amount, _ in groups)
+            groups.append((_text(self.language, "other" if self.employment else "other_values"), remainder, ""))
+
+        theme = self.palette.graphic
+        colors = iter((self.palette.accent, "#4382ab", "#a17b55", self.palette.muted, self.palette.hero_end, "#7c8d67"))
+        segments = []
+        for index, (name, amount, status) in enumerate(groups):
+            if theme:
+                color = theme.ring[index]
+            else:
+                color = self.palette.warning if status in _DEPARTED else self.palette.good if status in _EMPLOYED else next(colors)
+            member = QWidget()
+            line = row_layout(7)
+            line.setContentsMargins(0, 0, 0, 0)
+            if theme or not self.employment:
+                member.setObjectName("distributionRow")
+                member.setStyleSheet(f"QWidget#distributionRow {{ background: {self.palette.soft}; border-radius: 7px; }}")
+                line.setContentsMargins(6, 4, 6, 4)
+            member.setLayout(line)
+            dot = label()
+            dot.setFixedSize(9, 9)
+            dot.setStyleSheet(f"background:{color}; border-radius:4px;")
+            category = ElidedLabel("smallMuted")
+            category.setText(name)
+            line.addWidget(dot)
+            line.addWidget(category, 1)
+            line.addWidget(label(number(self.language, amount), "smallMuted"))
+            self.legend.addWidget(member)
+            segments.append((amount, color))
+        self.donut.set_counts(tuple(segments), self.total)
+
+    def _show_values(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(self.title.full_text)
+        dialog.resize(550, 445)
+        layout = QVBoxLayout(dialog)
+        table = QTableView()
+        table.setAccessibleName(dialog.windowTitle())
+        table.setModel(self.model)
+        table.setAlternatingRowColors(True)
+        table.setWordWrap(False)
+        table.verticalHeader().hide()
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        layout.addWidget(table)
+        close = button(translate(self.language, "close"))
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close, 0, Qt.AlignmentFlag.AlignTrailing)
+        dialog.exec()
+
+
 class DashboardPage(QWidget):
+    choose_charts = Signal()
+
     def __init__(self, language, palette):
         super().__init__()
         self.setObjectName("page")
@@ -569,7 +748,7 @@ class DashboardPage(QWidget):
         self._n = lambda count: number(language, count)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        scroll = QScrollArea()
+        scroll = self.scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addWidget(scroll)
@@ -606,6 +785,14 @@ class DashboardPage(QWidget):
             metrics.addWidget(metric, 1)
         body.addWidget(self.metric_row)
 
+        chart_bar = row_layout(12)
+        chart_bar.addWidget(label(self._t("charts"), "sectionTitle", True), 1)
+        self.chart_button = button(self._t("choose_charts"))
+        self.chart_button.setEnabled(False)
+        self.chart_button.clicked.connect(self.choose_charts)
+        chart_bar.addWidget(self.chart_button)
+        body.addLayout(chart_bar)
+
         charts = row_layout(12)
         trend_frame, trend_body = card()
         trend_body.addWidget(label(self._t("trend"), "sectionTitle", True))
@@ -629,23 +816,14 @@ class DashboardPage(QWidget):
         trend_body.addWidget(self.trend_hint)
         charts.addWidget(trend_frame, 7)
 
-        status_frame, status_body = card()
-        status_body.addWidget(label(self._t("statuses"), "sectionTitle", True))
-        self.donut = _Donut(language, palette)
-        self.status_hint = label("", "smallMuted", True)
-        status_body.addWidget(self.status_hint)
-        self.legend_area = QWidget()
-        legend_body = QVBoxLayout(self.legend_area)
-        legend_body.setContentsMargins(0, 0, 0, 0)
-        legend_body.addStretch()
-        self.legend = QVBoxLayout()
-        self.legend.setSpacing(6)
-        legend_body.addLayout(self.legend)
-        legend_body.addStretch()
-        self.status_composition = _StatusComposition(self.donut, self.legend_area)
-        status_body.addWidget(self.status_composition, 1)
-        charts.addWidget(status_frame, 4)
+        self.employment = _DistributionCard(language, palette, self._t("statuses"), employment=True)
+        charts.addWidget(self.employment, 4)
         body.addLayout(charts, 1)
+        self.chart_cards = {}
+        self.chart_grid = CardGrid()
+        self.chart_grid.hide()
+        body.addWidget(self.chart_grid)
+        self.chart_to_reveal = None
         self.selector.currentIndexChanged.connect(self._present_period)
         self.recolor(palette)
 
@@ -669,7 +847,38 @@ class DashboardPage(QWidget):
         self.summary = summary
         self.selector.setEnabled(summary.total is not None)
         self._present_period()
-        self._present_statuses()
+        total = summary.total or 0
+        hint = self._t("empty" if not total else "status_empty") if summary.total is not None else ""
+        self.employment.present(summary.statuses or (), total, hint)
+        self._present_charts(summary.charts, total)
+
+    def _present_charts(self, charts, total):
+        keys = {column.key for column, _ in charts}
+        for key in self.chart_cards.keys() - keys:
+            panel = self.chart_cards.pop(key)
+            panel.hide()
+            panel.deleteLater()
+        ordered = []
+        for column, counts in charts:
+            title = column.title(self.language)
+            panel = self.chart_cards.get(column.key)
+            if panel is None:
+                panel = self.chart_cards[column.key] = _DistributionCard(self.language, self.palette, title)
+                panel.setParent(self.chart_grid)
+            panel.present(counts, total, self._t("empty"), title=title)
+            ordered.append(panel)
+        self.chart_grid.show_cards(ordered)
+        self.chart_grid.setVisible(bool(ordered))
+        for panel in ordered:
+            panel.show()
+        key = self.chart_to_reveal
+        if key in keys:
+            self.chart_to_reveal = None
+            QTimer.singleShot(0, self, lambda: self._reveal_chart(key))
+
+    def _reveal_chart(self, key):
+        if self.isVisible() and key in self.chart_cards:
+            self.scroll.ensureWidgetVisible(self.chart_cards[key], 0, 18)
 
     def _present_period(self):
         summary = self.summary
@@ -698,49 +907,6 @@ class DashboardPage(QWidget):
         self.trend_hint.setText(hint)
         self.trend_hint.setVisible(bool(hint))
 
-    def _present_statuses(self):
-        while self.legend.count():
-            item = self.legend.takeAt(0)
-            item.widget().deleteLater()
-        total, statuses = self.summary.total, self.summary.statuses
-        hint = "unlinked" if total is None else "empty" if not total else "status_empty"
-        self.status_hint.setText(self._t(hint))
-        self.status_hint.setVisible(not statuses and total is not None)
-        self.status_composition.setVisible(bool(statuses))
-        if not statuses:
-            self.donut.set_counts((), 0)
-            return
-        colors = iter((self.palette.accent, "#4382ab", "#a17b55", self.palette.muted, self.palette.hero_end, "#7c8d67"))
-        categories = [(name or self._t("unspecified"), count, _key(name) if name else "") for name, count in statuses[:5]]
-        if len(statuses) > 5:
-            categories.append((self._t("other"), sum(count for _, count in statuses[5:]), ""))
-        segments = []
-        for index, (name, count, status) in enumerate(categories):
-            if self.palette.graphic:
-                color = self.palette.graphic.ring[index]
-            else:
-                color = self.palette.warning if status in _DEPARTED else self.palette.good if status in _EMPLOYED else next(colors)
-            item = QWidget()
-            line = row_layout(7)
-            if self.palette.graphic:
-                item.setObjectName("statusRow")
-                item.setStyleSheet(f"QWidget#statusRow {{ background: {self.palette.soft}; border-radius: 7px; }}")
-                line.setContentsMargins(6, 4, 6, 4)
-            else:
-                line.setContentsMargins(0, 0, 0, 0)
-            item.setLayout(line)
-            dot = label()
-            dot.setFixedSize(9, 9)
-            dot.setStyleSheet(f"background:{color}; border-radius:4px;")
-            category = ElidedLabel("smallMuted")
-            category.setText(name)
-            line.addWidget(dot)
-            line.addWidget(category, 1)
-            line.addWidget(label(self._n(count), "smallMuted"))
-            self.legend.addWidget(item)
-            segments.append((count, color))
-        self.donut.set_counts(tuple(segments), total)
-
     def recolor(self, palette):
         self.palette = palette
         graphic = palette.graphic is not None
@@ -759,8 +925,10 @@ class DashboardPage(QWidget):
         for metric in self.metrics:
             metric.recolor(palette)
         self.trend.recolor(palette)
-        self.donut.recolor(palette)
-        self.status_composition.set_graphic(graphic)
+        self.employment.recolor(palette)
+        for chart in self.chart_cards.values():
+            chart.recolor(palette)
+        self.chart_button.setIcon(icon("analytics", palette.accent, 17))
         trend_colors = palette.graphic.trend if graphic else (palette.accent, palette.warning)
         for key, color in zip(("hire", "exit"), trend_colors):
             self.trend_keys[key][0].setStyleSheet(f"background:{color}; border-radius:4px;")

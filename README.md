@@ -13,6 +13,7 @@
 ## کار با بانک و گزارش‌ها
 
 - **داشبورد** تعداد نفرات، جذب‌ها و خروج‌ها، نمودار روند و توزیع وضعیت اشتغال را نشان می‌دهد. بازه‌های ۳۰، ۹۰ و ۳۶۵ روزه برای رویدادهای تاریخ‌دار قابل انتخاب‌اند. در نبود ستون تاریخ خروج، تعداد خروج از وضعیت ثبت‌شدهٔ کارکنان به دست می‌آید.
+- در **داشبورد ← انتخاب نمودارها**، ستون‌های دلخواه شیت فعال را علامت بزنید. هر ستون یک کارت حلقه‌ای با مجموع نفرات و تعداد هر مقدار دارد. اگر ستون بیش از پنج مقدار داشته باشد، مقادیر کم‌تکرار در «سایر مقادیر» جمع می‌شوند و دکمهٔ **همهٔ مقادیر** جدول کامل را نشان می‌دهد. برای برداشتن یک کارت، تیک ستون را در همان پنجره بردارید. انتخاب‌ها برای هر شیت جداگانه ذخیره می‌شوند و نمودارها پس از ذخیرهٔ فایل اکسل خودکار به‌روز می‌شوند.
 - فیلدهای تاریخ فرم با تقویم شمسی و میلادی باز می‌شوند و می‌توانید روز جاری را انتخاب کنید. هشت فیلد پرکاربرد مثل وضعیت اشتغال و رتبه به‌صورت پیش‌فرض کشویی هستند. در **تنظیمات ← فهرست‌های کشویی فرم** می‌توانید این انتخاب را برای همهٔ ستون‌های شیت تغییر دهید.
 - فیلتر فهرست پرسنل و مقدار شرط گزارش از مقادیر یکتای ستون انتخاب‌شده پر می‌شوند. عنوان گزارش، نام پیشنهادی فایل خروجی است.
 - همهٔ ستون‌های دارای عنوان در جدول فعال قابل جست‌وجو، ویرایش و انتخاب برای گزارش هستند. در یک شیت بدون جدول، اولین ردیف دارای عنوان مبنای خواندن است. در شیت چندجدولی، جدول اول بر اساس موقعیت خوانده می‌شود.
@@ -56,4 +57,4 @@ Build the offline Windows x64 installer with NSIS 3.11 or later and Python.
 python packaging/build_windows.py --makensis /path/to/makensis
 ~~~
 
-A version tag such as `v1.4.0` triggers the Windows release workflow. It builds the installer, archives it with the tagged source, verifies the installer from that archive on Windows, and publishes the ZIP, standalone executable, and checksum.
+A version tag such as `v1.5.0` triggers the Windows release workflow. It builds the installer, archives it with the tagged source, verifies the installer from that archive on Windows, and publishes the ZIP, standalone executable, and checksum.

@@ -255,6 +255,7 @@ class Window(QMainWindow):
         body.addLayout(bar)
         horizontal.addWidget(stage, 1)
 
+        self.dashboard.choose_charts.connect(self._configure_dashboard_charts)
         self.people.connect_source.connect(self.choose_file)
         self.people.add_person.connect(lambda: self._record("add"))
         self.people.edit_person.connect(lambda: self._record("edit"))
@@ -416,6 +417,7 @@ class Window(QMainWindow):
 
     def _draw_layout(self):
         cols = self.view.snapshot.columns if self.view else ()
+        self.dashboard.chart_button.setEnabled(bool(cols))
         if self.people.columns != cols or self.reports.columns != cols:
             self.people.set_columns(cols)
             self.reports.set_columns(cols)
@@ -438,6 +440,7 @@ class Window(QMainWindow):
             self.catalog = {}
             self.summary = summarize(None)
             self.analytics_data = None
+            self.dashboard.chart_to_reveal = None
             self._show_metadata()
         self.view = view
         self.source_path = snapshot.path
@@ -477,9 +480,10 @@ class Window(QMainWindow):
         self.metadata_busy = True
         view, today = self.view, QDate.currentDate()
         bindings, scale = self._analysis_preferences(view)
+        chart_keys = self._dashboard_chart_keys(view)
 
         def collect():
-            catalog, summary = distinct_values(view), summarize(view, today)
+            catalog, summary = distinct_values(view), summarize(view, today, chart_keys)
             try:
                 data = load_dataset(view, bindings)
             except Exception as issue:
@@ -488,7 +492,8 @@ class Window(QMainWindow):
 
         def prepared(result, error):
             self.metadata_busy = False
-            if self.view is not view or self._analysis_preferences(view) != (bindings, scale):
+            if (self.view is not view or self._analysis_preferences(view) != (bindings, scale)
+                    or self._dashboard_chart_keys(view) != chart_keys):
                 self._update_metadata()
             elif error:
                 self.notify(self._reason(error))
@@ -501,6 +506,33 @@ class Window(QMainWindow):
                     self.analytics.show_error(self._reason(data_issue))
 
         self.bus.submit(collect, prepared)
+
+    def _dashboard_chart_keys(self, view):
+        if view is None:
+            return frozenset()
+        raw = self.settings.value("dashboard/columns/" + namespace(view.snapshot), "[]", str)
+        try:
+            keys = json.loads(raw)
+        except ValueError:
+            return frozenset()
+        return frozenset(key for key in keys if isinstance(key, str)) if isinstance(keys, list) else frozenset()
+
+    def _configure_dashboard_charts(self):
+        if self.view is None:
+            return
+        snapshot = self.view.snapshot
+        book_key = namespace(snapshot)
+        current = self._dashboard_chart_keys(self.view)
+        dialog = ColumnsDialog(self, self.language, snapshot.columns, current, title=self.t("dashboard_columns"),
+                               search_placeholder=self.t("search_columns"))
+        if dialog.exec() != dialog.DialogCode.Accepted or self.view is None or namespace(self.view.snapshot) != book_key:
+            return
+        checked = dialog.keys()
+        keys = [column.key for column in self.view.snapshot.columns if column.key in checked]
+        if set(keys) != current:
+            self.settings.setValue("dashboard/columns/" + book_key, json.dumps(keys, ensure_ascii=False))
+            self.dashboard.chart_to_reveal = next((key for key in keys if key not in current), None)
+            self._update_metadata()
 
     def _analysis_preferences(self, view):
         if view is None:
