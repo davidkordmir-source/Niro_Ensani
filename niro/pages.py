@@ -15,6 +15,7 @@ from .widgets import (
     ColumnsDialog, DistinctValuesCombo, ElidedLabel, Hero, Metric, RuleEditor, TablePanel, button, card, field,
     fill_options, icon, label, row_layout, section_header,
 )
+from .workbook import is_companion
 
 
 def _page_layout(page):
@@ -566,6 +567,7 @@ class SettingsPage(QWidget):
             return
         snapshot = view.snapshot
         self.path.setText(str(snapshot.path))
-        self.sheet.setEnabled(bool(snapshot.sheets))
-        fill_options(self.sheet, ((sheet.key, sheet.label) for sheet in snapshot.sheets), snapshot.sheet.key)
+        roster_sheets = [(sheet.key, sheet.label) for sheet in snapshot.sheets if not is_companion(sheet.label)]
+        self.sheet.setEnabled(bool(roster_sheets))
+        fill_options(self.sheet, roster_sheets, snapshot.sheet.key)
         self.local_state.setText(self.t("local_status", hidden=number(self.language, view.hidden), pending=number(self.language, view.pending)))

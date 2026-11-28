@@ -16,9 +16,12 @@ from PySide6.QtWidgets import (
 )
 
 from . import __version__
+from .attendance_page import AttendanceDialog, AttendancePage
 from .catalog import distinct_values, report_filename
 from .dashboard import DashboardPage, summarize
 from .filters import filter_records
+from .insights import evaluate, load_dataset, prepare_profile, save_attendance, tr as insight_text
+from .insights_page import AnalyticsPage, SourceDialog
 from .locale import number, translate
 from .pages import PeoplePage, ReportPage, SettingsPage
 from .record_fields import DEFAULT_COMBO_COLUMNS
@@ -93,6 +96,10 @@ class Window(QMainWindow):
         self.record_dialog = None
         self.catalog = {}
         self.summary = summarize(None)
+        self.analytics_data = None
+        self.analytics_scale = "percent"
+        self.analysis_busy = False
+        self.analysis_revision = 0
         self.metadata_busy = False
         self.metadata_date = QDate.currentDate()
         self.page_animation = None
@@ -110,6 +117,10 @@ class Window(QMainWindow):
         self.filter_timer.setSingleShot(True)
         self.filter_timer.setInterval(155)
         self.filter_timer.timeout.connect(self._filter)
+        self.analysis_timer = QTimer(self)
+        self.analysis_timer.setSingleShot(True)
+        self.analysis_timer.setInterval(150)
+        self.analysis_timer.timeout.connect(self._analyze)
         self.sync_timer = QTimer(self)
         self.sync_timer.setInterval(watch_interval)
         self.sync_timer.timeout.connect(self._sync)
@@ -166,7 +177,7 @@ class Window(QMainWindow):
 
         self.navigation = QButtonGroup(sidebar)
         self.nav = {}
-        for key in ("dashboard", "people", "reports", "settings"):
+        for key in ("dashboard", "analytics", "people", "attendance", "reports", "settings"):
             item = button(self.t(key), "nav")
             item.setCheckable(True)
             item.setMinimumHeight(46)
@@ -221,10 +232,15 @@ class Window(QMainWindow):
         self.stack = QStackedWidget()
         self.pages = {}
         self.dashboard = DashboardPage(self.language, self.colors)
+        self.analytics = AnalyticsPage(self.language, self.colors, self.settings)
         self.people = PeoplePage(self.language, self.colors)
+        self.attendance = AttendancePage(self.language, self.colors)
         self.reports = ReportPage(self.language, self.colors)
         self.options = SettingsPage(self.language, self.colors, self.font_key, self.theme, self.display_name)
-        for key, page in (("dashboard", self.dashboard), ("people", self.people), ("reports", self.reports), ("settings", self.options)):
+        for key, page in (
+            ("dashboard", self.dashboard), ("analytics", self.analytics), ("people", self.people),
+            ("attendance", self.attendance), ("reports", self.reports), ("settings", self.options),
+        ):
             self.pages[key] = page
             self.stack.addWidget(page)
         body.addWidget(self.stack, 1)
@@ -246,6 +262,12 @@ class Window(QMainWindow):
         self.people.restore.connect(self.restore_record)
         self.people.search_changed.connect(self._plan_filter)
         self.people.sort_changed.connect(self._plan_filter)
+        self.analytics.changed.connect(self._plan_analysis)
+        self.analytics.configure.connect(self._configure_analytics)
+        self.analytics.create_profile.connect(self._create_profile_sheet)
+        self.attendance.add.connect(lambda: self._attendance_dialog("add"))
+        self.attendance.edit.connect(lambda: self._attendance_dialog("edit"))
+        self.attendance.remove.connect(lambda: self._attendance_dialog("remove"))
         self.reports.rules_changed.connect(self._plan_filter)
         self.reports.export_requested.connect(self.export_report)
         self.options.connect_source.connect(self.choose_file)
@@ -290,6 +312,8 @@ class Window(QMainWindow):
         self.nav[key].setChecked(True)
         self._color_navigation()
         self.breadcrumb.setText(self.t("workspace") + " / " + self.t(key))
+        if key == "analytics":
+            self._plan_analysis()
         if changed and animate and self.isVisible():
             effect = QGraphicsOpacityEffect(target)
             effect.setOpacity(0.78)
@@ -330,6 +354,8 @@ class Window(QMainWindow):
             return
         search = self.people.term.text(), self.people.search_column.currentData(), self.people.current_sort, self.people.sort_reverse
         value_filter = self.people.selected_value()
+        analysis_person = self.analytics.person.currentData()
+        attendance_filter = self.attendance.search.text(), self.attendance.status.currentData()
         plan = (self.reports.title.text(), self.reports.style.currentData(), self.reports.format.currentData(),
                 self.reports.combine.currentData(), self.reports.selected_keys, self.reports.rule_values())
         self.language = value
@@ -340,6 +366,9 @@ class Window(QMainWindow):
         self.people.search_column.setCurrentIndex(max(0, self.people.search_column.findData(search[1])))
         self.people.current_sort, self.people.sort_reverse = search[2:]
         self.people.select_value(value_filter)
+        self.analytics.person.setCurrentIndex(max(0, self.analytics.person.findData(analysis_person)))
+        self.attendance.search.setText(attendance_filter[0])
+        self.attendance.status.setCurrentIndex(max(0, self.attendance.status.findData(attendance_filter[1])))
         title, layout_style, extension, any_rule, keys, rules = plan
         self.reports.title.setText(title)
         self.reports.style.setCurrentIndex(self.reports.style.findData(layout_style))
@@ -408,6 +437,7 @@ class Window(QMainWindow):
         if not previous or previous.path != snapshot.path or previous.sheet.key != snapshot.sheet.key:
             self.catalog = {}
             self.summary = summarize(None)
+            self.analytics_data = None
             self._show_metadata()
         self.view = view
         self.source_path = snapshot.path
@@ -438,25 +468,151 @@ class Window(QMainWindow):
         self.people.set_distinct_values(self.catalog)
         self.reports.set_distinct_values(self.catalog)
         self.dashboard.set_summary(self.summary)
+        self.analytics.set_dataset(self.analytics_data, self.analytics_scale, loading=self.view is not None)
+        self.attendance.set_dataset(self.analytics_data)
 
     def _update_metadata(self):
         if self.metadata_busy:
             return
         self.metadata_busy = True
         view, today = self.view, QDate.currentDate()
+        bindings, scale = self._analysis_preferences(view)
+
+        def collect():
+            catalog, summary = distinct_values(view), summarize(view, today)
+            try:
+                data = load_dataset(view, bindings)
+            except Exception as issue:
+                return catalog, summary, None, issue
+            return catalog, summary, data, None
 
         def prepared(result, error):
             self.metadata_busy = False
-            if self.view is not view:
+            if self.view is not view or self._analysis_preferences(view) != (bindings, scale):
                 self._update_metadata()
             elif error:
                 self.notify(self._reason(error))
             else:
-                self.catalog, self.summary = result
+                self.catalog, self.summary, self.analytics_data, data_issue = result
+                self.analytics_scale = scale
                 self.metadata_date = today
                 self._show_metadata()
+                if data_issue:
+                    self.analytics.show_error(self._reason(data_issue))
 
-        self.bus.submit(lambda: (distinct_values(view), summarize(view, today)), prepared)
+        self.bus.submit(collect, prepared)
+
+    def _analysis_preferences(self, view):
+        if view is None:
+            return {}, "percent"
+        key = "analytics/source/" + namespace(view.snapshot)
+        raw = self.settings.value(key, "{}", str)
+        try:
+            selected = json.loads(raw)
+        except ValueError:
+            selected = {}
+        if not isinstance(selected, dict):
+            return {}, "percent"
+        columns = selected.get("columns", {})
+        if not isinstance(columns, dict):
+            columns = {}
+        return {field: col for field, col in columns.items() if isinstance(col, str)}, selected.get("scale", "percent")
+
+    def _configure_analytics(self):
+        view = self.view
+        if view is None:
+            return
+        bindings, scale = self._analysis_preferences(view)
+        dialog = SourceDialog(self, self.language, view.snapshot.columns, bindings, scale)
+        if dialog.exec() != dialog.DialogCode.Accepted:
+            return
+        self.settings.setValue("analytics/source/" + namespace(view.snapshot),
+                               json.dumps({"columns": dialog.binding_values(), "scale": dialog.scale.currentData()}, ensure_ascii=False))
+        self._update_metadata()
+
+    def _plan_analysis(self):
+        self.analysis_revision += 1
+        if self.page_key == "analytics":
+            self.analysis_timer.start()
+
+    def _analyze(self):
+        if self.analysis_busy or self.page_key != "analytics" or not self.analytics_data:
+            return
+        query = self.analytics.query()
+        if query is None:
+            return
+        self.analysis_busy = True
+        revision, data = self.analysis_revision, self.analytics_data
+
+        def done(result, error):
+            self.analysis_busy = False
+            if revision != self.analysis_revision:
+                if self.page_key == "analytics":
+                    self.analysis_timer.start(0)
+                return
+            if error:
+                self.analytics.show_error(self._reason(error))
+            else:
+                self.analytics.present(result)
+
+        self.bus.submit(lambda: evaluate(data, query), done)
+
+    def _create_profile_sheet(self):
+        data = self.analytics_data
+        if data is None or data.profiles is not None:
+            return
+        snapshot = data.view.snapshot
+
+        def write():
+            new = prepare_profile(data, lambda payload: self.store.backup(snapshot.path, payload))
+            return self.store.view(new)
+
+        def saved(view):
+            self._apply(view)
+            self.notify(insight_text(self.language, "profile_created"))
+
+        self._run_write(write, saved, expected=data.view)
+
+    def _attendance_dialog(self, operation):
+        data = self.analytics_data
+        if data is None or self.write_busy:
+            return
+        event = self.attendance.selected() if operation != "add" else None
+        if operation != "add" and event is None:
+            return
+        path = data.view.snapshot.path
+        t = lambda key: insight_text(self.language, key)
+
+        def write(request, delete=False):
+            person, day, session, status = request
+            updated = save_attendance(data, person, day, session, status, event.row if event else None, delete,
+                                      lambda payload: self.store.backup(path, payload))
+            return self.store.view(updated)
+
+        if operation == "remove":
+            box = QMessageBox(QMessageBox.Icon.Warning, t("attendance_title"), t("attendance_delete_question"), parent=self)
+            remove = box.addButton(self.t("delete"), QMessageBox.ButtonRole.DestructiveRole)
+            cancel = box.addButton(self.t("cancel"), QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(cancel)
+            box.exec()
+            if box.clickedButton() is remove:
+                def deleted(view):
+                    self._apply(view)
+                    self.notify(t("attendance_deleted"))
+                self._run_write(lambda: write((None, None, "", ""), delete=True), deleted, expected=data.view)
+            return
+
+        dialog = AttendanceDialog(self, self.language, self.colors, data, event)
+
+        def submitted(request):
+            def saved(view):
+                self._apply(view)
+                self.notify(t("attendance_saved"))
+                dialog.accept()
+            self._run_write(lambda: write(request), saved, dialog.failed, expected=data.view)
+
+        dialog.submitted.connect(submitted)
+        dialog.exec()
 
     def _combo_overrides(self, view):
         raw = self.settings.value("formFields/" + namespace(view.snapshot), "{}", str)

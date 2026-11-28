@@ -61,10 +61,12 @@ def _self_test(app, system_font, output):
     from PySide6.QtCore import QDate
     from PySide6.QtWidgets import QComboBox
 
+    from .insights import Query, evaluate, load_dataset, prepare_profile, save_attendance
     from .record_fields import DateField, GREGORIAN, JALALI, _DatePicker
     from .reports import Report, export
+    from .schema import PROFILE_SHEET
     from .visuals import illustration
-    from .workbook import make_template, read_workbook, update_workbook
+    from .workbook import companion_snapshots, label_key, make_template, read_workbook, update_workbook
 
     with TemporaryDirectory(prefix="niro-self-test-") as directory:
         root = Path(directory)
@@ -88,6 +90,12 @@ def _self_test(app, system_font, output):
         assert local.records[0].values[0] == "محلی"
         store.copy_backup(database, root / "recovery.xlsx")
         assert not read_workbook(root / "recovery.xlsx").rows
+        backup = lambda payload: store.backup(database, payload)
+        augmented = prepare_profile(load_dataset(local), backup)
+        sheet = companion_snapshots(augmented)[PROFILE_SHEET]
+        update_workbook(sheet, "edit", sheet.rows[0].number, {label_key("مدیریت"): "آزمایش", label_key("تعداد مرخصی"): "2"}, backup)
+        sports = load_dataset(store.view(read_workbook(database)))
+        save_attendance(sports, "p:0012", today, "جلسهٔ آزمایشی", "present", None, False, backup)
         report = Report("گزارش", ("نام",), (("آزمایشی",),))
         for extension in (".xlsx", ".docx", ".pptx", ".csv"):
             export(report, root / (extension[1:] + "-report" + extension))
@@ -106,6 +114,22 @@ def _self_test(app, system_font, output):
                 assert window.summary.total == 1
                 assert sum(window.summary.periods[0].hires) == 1
                 assert window.summary.departures_by_status == 1
+                assert window.attendance.model.rowCount() == 1
+                assert window.attendance.model.rows[0].status == "present"
+                assert window.analytics_data.profiles is not None
+
+                window.set_page("analytics", animate=False)
+                query = Query("fa", ("department", "leave", "sport"), today.addYears(-2), today, today)
+                analytics = evaluate(window.analytics_data, query)
+                window.analytics.present(analytics)
+                assert window.analytics.cards["department"].headline.text() == "۱ نفر"
+                assert window.analytics.cards["leave"].headline.text() == "۲ بار"
+                assert window.analytics.cards["sport"].headline.text() == "۱۰۰٪"
+                panel = window.analytics.cards["department"].chart
+                for mode in ("bar", "line", "area", "ring", "table"):
+                    panel.types.setCurrentIndex(panel.types.findData(mode))
+                    assert panel.types.currentData() == mode and not panel.grab().isNull()
+                assert window.analytics.compare_chart.data.table_only
 
                 window.dashboard.selector.setCurrentIndex(window.dashboard.selector.findData(90))
                 for key in ("neon_night", "turquoise_wave", "warm_atlas"):

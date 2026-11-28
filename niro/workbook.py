@@ -15,11 +15,11 @@ import re
 import stat
 from tempfile import mkstemp
 import unicodedata
-from zipfile import BadZipFile, ZipFile
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from lxml import etree as ET
 
-from .schema import FIELDS, PRIMARY_SHEET
+from .schema import COMPANION_SHEETS, FIELDS, PRIMARY_SHEET
 
 
 MAIN = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
@@ -50,6 +50,13 @@ def normalize(value: str) -> str:
 
 def label_key(label: str) -> str:
     return normalize(label)
+
+
+def is_companion(label: str) -> bool:
+    return label_key(label) in _COMPANION_KEYS
+
+
+_COMPANION_KEYS = frozenset(map(label_key, COMPANION_SHEETS))
 
 
 TRANSLATED_LABELS = {label_key(fa): en for fa, en in FIELDS}
@@ -266,8 +273,19 @@ class _Reader:
             return _string(raw)
         format_id, custom = self._style(cell)
         tokens = re.sub(r'"[^"]*"|\\.|\[[^\]]+\]', "", custom.split(";")[0]).lower()
-        if format_id in BUILTIN_DATES or re.search(r"[ydhs]|m{2,}", tokens):
-            return _date_value(raw, str(format_id), self.date1904)
+        elapsed = re.search(r"\[[hms]+\]", custom, re.IGNORECASE)
+        if elapsed or format_id in BUILTIN_DATES or re.search(r"[ydhs]|m{2,}", tokens):
+            time_only = format_id not in BUILTIN_DATES and not re.search(r"[yd]", tokens) and (
+                "h" in tokens or elapsed
+            )
+            return _date_value(raw, "46" if time_only else str(format_id), self.date1904)
+        if format_id in (9, 10) or "%" in tokens:
+            try:
+                percent = Decimal(raw) * 100
+                if percent.is_finite() and -100 <= percent.adjusted() <= 100:
+                    return format(percent.normalize(), "f") + "%"
+            except InvalidOperation:
+                pass
         if re.fullmatch(r"0{2,}", tokens):
             try:
                 return f"{int(Decimal(raw)):0{len(tokens)}d}"
@@ -292,7 +310,12 @@ class _Reader:
                 return 1
             return 2 if sheet.label == PRIMARY_SHEET else 3
 
-        candidates = sorted(self.sheets, key=priority)
+        candidates = sorted(
+            (sheet for sheet in self.sheets if priority(sheet) < 2 or not is_companion(sheet.label)),
+            key=priority,
+        )
+        if not candidates:
+            raise WorkbookError("no_headers")
         for sheet in candidates:
             loaded = _SheetData(self, sheet)
             if loaded.columns or priority(sheet) < 2:
@@ -544,7 +567,30 @@ def _snapshot(path: Path, raw: bytes, signature: tuple[int, ...], preferred: str
         with ZipFile(BytesIO(raw)) as archive:
             reader = _Reader(archive)
             sheet = reader.select(preferred)
-            return Snapshot(path, signature, sha256(raw).hexdigest(), sheet.sheet, reader.sheets, sheet.columns, sheet.scan_rows())
+            return _sheet_snapshot(path, signature, sha256(raw).hexdigest(), reader, sheet)
+    except (BadZipFile, KeyError, IndexError, ValueError, ET.XMLSyntaxError, RuntimeError) as issue:
+        raise WorkbookError("invalid_workbook") from issue
+
+
+def _sheet_snapshot(path, signature, revision, reader, data) -> Snapshot:
+    return Snapshot(path, signature, revision, data.sheet, reader.sheets, data.columns, data.scan_rows())
+
+
+def companion_snapshots(snapshot: Snapshot) -> dict[str, Snapshot]:
+    if not any(is_companion(sheet.label) for sheet in snapshot.sheets):
+        return {}
+    raw, signature = _read_bytes(snapshot.path)
+    revision = sha256(raw).hexdigest()
+    if revision != snapshot.revision:
+        raise WorkbookError("source_changed")
+    try:
+        with ZipFile(BytesIO(raw)) as archive:
+            reader = _Reader(archive)
+            names = {label_key(sheet.label): sheet for sheet in reader.sheets}
+            return {
+                name: _sheet_snapshot(snapshot.path, signature, revision, reader, _SheetData(reader, names[label_key(name)]))
+                for name in COMPANION_SHEETS if label_key(name) in names
+            }
     except (BadZipFile, KeyError, IndexError, ValueError, ET.XMLSyntaxError, RuntimeError) as issue:
         raise WorkbookError("invalid_workbook") from issue
 
@@ -573,9 +619,38 @@ def _replace_source(temp: Path, path: Path) -> None:
 
 
 def update_workbook(snapshot: Snapshot, operation: str, row_number: int | None, values: dict[str, str], backup) -> Snapshot:
-    path = snapshot.path
     if operation not in ("add", "edit", "delete"):
         raise ValueError(operation)
+
+    def edit(original):
+        reader = _Reader(original)
+        sheet = reader.select((snapshot.sheet.key, snapshot.sheet.label))
+        parts = sheet.change(operation, row_number, values)
+        calc = reader.book.find(_tag("calcPr"))
+        if calc is not None:
+            calc.set("fullCalcOnLoad", "1")
+        removed: set[str] = set()
+        chain = _parts(original, BOOK, "calcChain")
+        if operation == "delete" and chain:
+            removed.update(chain.values())
+            rels = _xml(original, BOOK_RELS)
+            for relationship in list(rels):
+                if relationship.get("Id") in chain:
+                    rels.remove(relationship)
+            content = _xml(original, "[Content_Types].xml")
+            for member in list(content):
+                if member.get("PartName", "").lstrip("/") in removed:
+                    content.remove(member)
+            parts[BOOK_RELS] = _xml_bytes(rels)
+            parts["[Content_Types].xml"] = _xml_bytes(content)
+        parts[BOOK] = _xml_bytes(reader.book)
+        return parts, removed
+
+    return _edit_package(snapshot, edit, backup)
+
+
+def _edit_package(snapshot, edit, backup):
+    path = snapshot.path
     _check_excel_lock(path)
     raw, signature = _read_bytes(path)
     if sha256(raw).hexdigest() != snapshot.revision:
@@ -584,32 +659,14 @@ def update_workbook(snapshot: Snapshot, operation: str, row_number: int | None, 
     temp = Path(name)
     try:
         with os.fdopen(fd, "wb") as output, ZipFile(BytesIO(raw)) as original:
-            reader = _Reader(original)
-            sheet = reader.select((snapshot.sheet.key, snapshot.sheet.label))
-            parts = sheet.change(operation, row_number, values)
-            calc = reader.book.find(_tag("calcPr"))
-            if calc is not None:
-                calc.set("fullCalcOnLoad", "1")
-            removed: set[str] = set()
-            chain = _parts(original, BOOK, "calcChain")
-            if operation == "delete" and chain:
-                removed.update(chain.values())
-                rels = _xml(original, BOOK_RELS)
-                for relationship in list(rels):
-                    if relationship.get("Id") in chain:
-                        rels.remove(relationship)
-                content = _xml(original, "[Content_Types].xml")
-                for member in list(content):
-                    if member.get("PartName", "").lstrip("/") in removed:
-                        content.remove(member)
-                parts[BOOK_RELS] = _xml_bytes(rels)
-                parts["[Content_Types].xml"] = _xml_bytes(content)
-            parts[BOOK] = _xml_bytes(reader.book)
-            with ZipFile(output, "w") as updated:
+            parts, removed = edit(original)
+            with ZipFile(output, "w", ZIP_DEFLATED) as updated:
                 for member in original.infolist():
                     if member.filename not in removed:
-                        item = parts[member.filename] if member.filename in parts else original.read(member)
+                        item = parts.pop(member.filename) if member.filename in parts else original.read(member)
                         updated.writestr(member, item)
+                for part, item in parts.items():
+                    updated.writestr(part, item)
                 updated.comment = original.comment
             output.flush()
             os.fsync(output.fileno())
@@ -628,6 +685,68 @@ def update_workbook(snapshot: Snapshot, operation: str, row_number: int | None, 
         return Snapshot(result.path, stamp(path), result.revision, result.sheet, result.sheets, result.columns, result.rows)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def create_companion_sheet(snapshot: Snapshot, title: str, headings: tuple[str, ...],
+                           rows: tuple[tuple[str, ...], ...], backup) -> Snapshot:
+    if title not in COMPANION_SHEETS or not headings:
+        raise ValueError(title)
+    if len(rows) >= MAX_ROW:
+        raise WorkbookError("add_in_excel")
+
+    def edit(archive):
+        book = _xml(archive, BOOK)
+        sheets = book.find(_tag("sheets"))
+        protection = book.find(_tag("workbookProtection"))
+        if any(name.lower().startswith("_xmlsignatures/") for name in archive.namelist()) or (
+            protection is not None and protection.get("lockStructure", "0").lower() in ("1", "true")
+        ):
+            raise WorkbookError("protected_workbook")
+        if any(label_key(item.get("name", "")) == label_key(title) for item in sheets):
+            raise WorkbookError("companion_exists")
+        sheet_id = max((int(item.get("sheetId", "0")) for item in sheets), default=0) + 1
+        rels = _xml(archive, BOOK_RELS)
+        rel_ids = {item.get("Id") for item in rels}
+        filenames = set(archive.namelist())
+        index = sheet_id
+        while f"xl/worksheets/sheet{index}.xml" in filenames or f"rIdNiro{index}" in rel_ids:
+            index += 1
+        target, relation = f"worksheets/sheet{index}.xml", f"rIdNiro{index}"
+        ET.SubElement(sheets, _tag("sheet"), name=title, sheetId=str(sheet_id), attrib={f"{{{OFFICE_REL}}}id": relation})
+        ET.SubElement(rels, f"{{{PACKAGE_REL}}}Relationship", Id=relation, Type=OFFICE_REL + "/worksheet", Target=target)
+        content = _xml(archive, "[Content_Types].xml")
+        ET.SubElement(content, f"{{{CONTENT}}}Override", PartName="/xl/" + target,
+                      ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml")
+        sheet = ET.Element(_tag("worksheet"), nsmap={None: MAIN})
+        ref = f"A1:{_letter(len(headings))}{1 + len(rows)}"
+        ET.SubElement(sheet, _tag("dimension"), ref=ref)
+        views = ET.SubElement(sheet, _tag("sheetViews"))
+        view = ET.SubElement(views, _tag("sheetView"), rightToLeft="1", workbookViewId="0")
+        ET.SubElement(view, _tag("pane"), ySplit="1", topLeftCell="A2", activePane="bottomLeft", state="frozen")
+        ET.SubElement(sheet, _tag("sheetFormatPr"), defaultRowHeight="17")
+        columns = ET.SubElement(sheet, _tag("cols"))
+        ET.SubElement(columns, _tag("col"), min="1", max=str(len(headings)), width="22", customWidth="1")
+        data = ET.SubElement(sheet, _tag("sheetData"))
+        for number, values in enumerate((headings, *rows), 1):
+            if len(values) != len(headings):
+                raise ValueError("Sheet row has incorrect width")
+            row = ET.SubElement(data, _tag("row"), r=str(number))
+            for position, value in enumerate(values, 1):
+                if not value:
+                    continue
+                if INVALID_XML.search(value) or len(value.encode("utf-16-le")) // 2 > 32767:
+                    raise WorkbookError("cell_too_long")
+                cell = ET.SubElement(row, _tag("c"), r=f"{_letter(position)}{number}", t="inlineStr")
+                text = ET.SubElement(ET.SubElement(cell, _tag("is")), _tag("t"), attrib={XML_SPACE: "preserve"})
+                text.text = EXCEL_ESCAPE.sub(lambda match: "_x005F_" + match[0][1:], value)
+        if rows:
+            ET.SubElement(sheet, _tag("autoFilter"), ref=ref)
+        return {
+            BOOK: _xml_bytes(book), BOOK_RELS: _xml_bytes(rels),
+            "[Content_Types].xml": _xml_bytes(content), "xl/" + target: _xml_bytes(sheet),
+        }, set()
+
+    return _edit_package(snapshot, edit, backup)
 
 
 def make_template(path: Path) -> None:

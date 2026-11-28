@@ -151,6 +151,16 @@ def icon(name: str, color: str, size: int = 20) -> QIcon:
         line((8, 16), (8, 13))
         line((12, 16), (12, 10))
         line((16, 16), (16, 7))
+    elif name == "analytics":
+        line((3, 4), (3, 20), (21, 20))
+        line((6, 15), (10, 10), (14, 12), (20, 5))
+        dot(20, 5, 1)
+    elif name == "attendance":
+        rect(4, 5, 16, 16)
+        line((8, 3), (8, 7))
+        line((16, 3), (16, 7))
+        line((4, 9), (20, 9))
+        line((8, 15), (11, 18), (16, 12))
     elif name == "search":
         dot(10, 10, 5.5)
         line((14.2, 14.2), (20, 20))
