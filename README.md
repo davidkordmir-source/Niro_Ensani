@@ -55,4 +55,4 @@ Build the offline Windows x64 installer with NSIS 3.11 or later and Python.
 python packaging/build_windows.py --makensis /path/to/makensis
 ~~~
 
-A version tag such as `v1.3.2` triggers the Windows release workflow. It builds the installer, installs it on Windows, runs the installed application smoke test, and publishes the executable and checksum.
+A version tag such as `v1.3.3` triggers the Windows release workflow. It builds the installer, installs it on Windows, runs the installed application smoke test, and publishes the executable and checksum.

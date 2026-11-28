@@ -58,7 +58,7 @@ class Splash(QWidget):
 
 
 def _self_test(app, system_font, output):
-    from PySide6.QtCore import QDate
+    from PySide6.QtCore import QCoreApplication, QDate, QEvent
     from PySide6.QtWidgets import QComboBox
 
     from .insights import load_dataset, prepare_profile, save_attendance
@@ -133,8 +133,10 @@ def _self_test(app, system_font, output):
                     index = panel.types.findData(mode)
                     assert index >= 0, f"Missing chart mode {mode}"
                     panel.types.setCurrentIndex(index)
+                    QCoreApplication.sendPostedEvents(None, QEvent.Type.LayoutRequest)
                     display = panel.table if mode == "table" else panel.plot
                     assert panel.stack.currentWidget() is display, f"Chart mode {mode} did not switch its view"
+                    assert panel.height() >= 216, f"Chart mode {mode} left no space for the plot or table"
                     assert not panel.grab().isNull(), f"Chart mode {mode} could not render at {panel.size()}"
                 assert window.analytics.compare_chart.data.table_only
 

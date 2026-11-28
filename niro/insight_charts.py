@@ -5,7 +5,7 @@ from math import atan2, ceil, degrees, floor, log10
 from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QComboBox, QGridLayout, QStackedWidget, QTableView, QToolTip, QVBoxLayout, QWidget,
+    QComboBox, QGridLayout, QLayout, QStackedWidget, QTableView, QToolTip, QVBoxLayout, QWidget,
 )
 
 from .insights import Chart, format_value, tr
@@ -63,7 +63,6 @@ class _Plot(QWidget):
         self.offset = 0
         self.window_size = 8
         self.slices = ()
-        self.setMinimumHeight(216)
 
     def set_plot(self, chart, mode, offset, window_size, slices):
         self.chart, self.mode, self.offset, self.window_size, self.slices = chart, mode, offset, window_size, slices
@@ -248,12 +247,13 @@ class ChartPanel(QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().hide()
         self.table.horizontalHeader().setDefaultSectionSize(148)
-        self.table.setMinimumHeight(216)
         self.stack = QStackedWidget()
+        self.stack.setMinimumHeight(216)
         self.stack.addWidget(self.plot)
         self.stack.addWidget(self.table)
 
         pane = QVBoxLayout(self)
+        pane.setVerticalSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         pane.setContentsMargins(0, 0, 0, 0)
         top = row_layout()
         top.addWidget(label(tr(language, "chart_type"), "smallMuted"))
@@ -322,7 +322,9 @@ class ChartPanel(QWidget):
                                    last=format_value(min(total, self.offset + size), self.language),
                                    total=format_value(total, self.language)))
         while self.legend.count():
-            self.legend.takeAt(0).widget().deleteLater()
+            entry = self.legend.takeAt(0).widget()
+            entry.hide()
+            entry.deleteLater()
         shown = [(item.label, None, index) for index, item in enumerate(self.data.series)
                  if any(value is not None for value in item.values)] if not ring else [
                      (name, count, index) for index, (name, count) in enumerate(slices)]
