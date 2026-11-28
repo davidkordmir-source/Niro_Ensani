@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 from .filters import NO_VALUE, OPERATORS, Rule
 from .locale import number, translate
 from .theme import ASSETS
+from .visuals import artwork_width, brandmark, draw_banner
 
 
 def label(text: str = "", style: str = "", wrap: bool = False) -> QLabel:
@@ -185,6 +186,10 @@ def icon(name: str, color: str, size: int = 20) -> QIcon:
     elif name == "plus":
         line((5, 12), (19, 12))
         line((12, 5), (12, 19))
+    elif name == "departure":
+        line((11, 4), (5, 4), (5, 20), (11, 20))
+        line((10, 12), (20, 12))
+        line((16, 8), (20, 12), (16, 16))
     elif name == "close":
         line((7, 7), (17, 17))
         line((17, 7), (7, 17))
@@ -202,8 +207,7 @@ class Hero(QWidget):
         super().__init__()
         self.palette = palette
         self.setMinimumHeight(134)
-        stack = QVBoxLayout(self)
-        stack.setContentsMargins(24, 13, 24, 13)
+        stack = self.stack = QVBoxLayout(self)
         stack.setSpacing(2)
         self.tag = label("", "heroTag")
         self.title = ElidedLabel("heroTitle")
@@ -213,15 +217,33 @@ class Hero(QWidget):
         stack.addWidget(self.title)
         stack.addWidget(self.subtitle)
         stack.addStretch()
+        self._inset()
+
+    def recolor(self, palette):
+        self.palette = palette
+        self._inset()
+        self.update()
+
+    def _inset(self):
+        space = round(artwork_width(QRectF(self.rect()))) if self.palette.graphic else 0
+        rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        self.stack.setContentsMargins(24 + (space if rtl else 0), 13, 24 + (0 if rtl else space), 13)
+
+    def resizeEvent(self, event):
+        self._inset()
+        super().resizeEvent(event)
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         bounds = QRectF(self.rect()).adjusted(0, 0, -1, -1)
+        rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        if self.palette.graphic:
+            draw_banner(painter, bounds, self.palette, rtl)
+            return
         clip = QPainterPath()
         clip.addRoundedRect(bounds, 17, 17)
         painter.setClipPath(clip)
-        rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
         tone = QLinearGradient(bounds.topRight() if rtl else bounds.topLeft(), bounds.bottomLeft() if rtl else bounds.bottomRight())
         tone.setColorAt(0, QColor(self.palette.hero_start))
         tone.setColorAt(1, QColor(self.palette.hero_end))
@@ -596,7 +618,7 @@ class ColumnsDialog(QDialog):
 class RecordDialog(QDialog):
     submitted = Signal(object)
 
-    def __init__(self, parent, language, columns, record, operation, choices=None):
+    def __init__(self, parent, language, columns, record, operation, choices=None, *, palette=None):
         from .record_fields import DEFAULT_COMBO_COLUMNS, DateField, catalog_values, is_date_column
         from .workbook import label_key
 
@@ -606,7 +628,9 @@ class RecordDialog(QDialog):
         self.record = record
         self.editors = {}
         self.original = {}
+        self.date_fields = []
         self.busy = False
+        self.header = None
         title = self.t({"add": "new_person", "edit": "edit_person", "delete": "confirm_delete"}[operation])
         self.setWindowTitle(title)
         self.setWindowIcon(QIcon(str(ASSETS / "niro.png")))
@@ -649,6 +673,7 @@ class RecordDialog(QDialog):
                         combo.set_choices(catalog_values(column.label, observed), original)
                     if is_date_column(column.label):
                         editor = DateField(original, language, combo)
+                        self.date_fields.append(editor)
                     elif combo is not None:
                         editor = combo
                     elif column.key in ("توضیحات", "notes") or "\n" in original:
@@ -693,14 +718,18 @@ class RecordDialog(QDialog):
         self.cancel.clicked.connect(self.reject)
         self.save.clicked.connect(self._submit)
         self._scope_text()
+        if palette is not None:
+            self.recolor(palette)
 
     def _add_header(self, layout, title, language):
         banner, banner_layout = card()
+        banner.setObjectName("recordHeader")
+        self.header = banner
         direction = Qt.LayoutDirection.RightToLeft if language == "fa" else Qt.LayoutDirection.LeftToRight
         banner.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         line = row_layout(14)
         banner_layout.addLayout(line)
-        mark = label()
+        mark = self.header_mark = label()
         ratio = mark.devicePixelRatioF()
         pixels = round(55 * ratio)
         logo = QPixmap(str(ASSETS / "niro.png")).scaled(
@@ -718,6 +747,12 @@ class RecordDialog(QDialog):
         copy.addWidget(label(self.t("record_lead"), "muted", True))
         line.addWidget(words, 1)
         layout.addWidget(banner)
+
+    def recolor(self, palette):
+        if self.header is not None:
+            self.header_mark.setPixmap(brandmark(palette, 55))
+        for editor in self.date_fields:
+            editor.recolor(palette.text)
 
     def _scope_text(self):
         excel = self.scope.currentData() == "excel"

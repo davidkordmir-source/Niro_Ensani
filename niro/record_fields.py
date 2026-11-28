@@ -9,7 +9,7 @@ from PySide6.QtCore import QCalendar, QDate, QLocale, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QTextCharFormat
 from PySide6.QtWidgets import (
     QCalendarWidget, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QTableView, QVBoxLayout, QWidget,
+    QPushButton, QTableView, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .workbook import DIGITS, label_key
@@ -164,14 +164,17 @@ class DateField(QWidget):
         layout.addWidget(self.calendar_button)
         self.calendar_button.clicked.connect(self._choose)
 
-    def _calendar_icon(self) -> QIcon:
+    def recolor(self, ink: str) -> None:
+        self.calendar_button.setIcon(self._calendar_icon(ink))
+
+    def _calendar_icon(self, ink: str | None = None) -> QIcon:
         pixmap = QPixmap(36, 36)
         pixmap.fill(Qt.GlobalColor.transparent)
         pixmap.setDevicePixelRatio(2)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         palette = self.calendar_button.palette()
-        foreground = palette.color(palette.ColorRole.ButtonText)
+        foreground = QColor(ink) if ink else palette.color(palette.ColorRole.ButtonText)
         painter.setPen(QPen(foreground, 1.25))
         painter.drawRoundedRect(2, 4, 14, 12, 2, 2)
         painter.drawLine(2, 8, 16, 8)
@@ -213,7 +216,7 @@ class _DatePicker(QDialog):
         super().__init__(parent)
         self.fa = fa
         self.setWindowTitle("انتخاب تاریخ" if fa else "Choose date")
-        self.resize(438, 366)
+        self.resize(476, 380)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 14, 18, 14)
 
@@ -260,6 +263,26 @@ class _DatePicker(QDialog):
 
     def system(self) -> QCalendar.System:
         return self.kind.currentData()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        rtl = self.calendar.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        for name, right in (("qt_calendar_prevmonth", rtl), ("qt_calendar_nextmonth", not rtl)):
+            button = self.calendar.findChild(QToolButton, name)
+            if button is None:
+                continue
+            mark = QPixmap(32, 32)
+            mark.fill(Qt.GlobalColor.transparent)
+            mark.setDevicePixelRatio(2)
+            painter = QPainter(mark)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            color = button.palette().color(button.palette().ColorRole.ButtonText)
+            painter.setPen(QPen(color, 1.65, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            tail, point = (6, 10) if right else (10, 6)
+            painter.drawLine(tail, 4, point, 8)
+            painter.drawLine(point, 8, tail, 12)
+            painter.end()
+            button.setIcon(QIcon(mark))
 
     def _change_calendar(self):
         selection = self.calendar.selectedDate()

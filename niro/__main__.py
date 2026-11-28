@@ -63,6 +63,7 @@ def _self_test(app, system_font, output):
 
     from .record_fields import DateField, GREGORIAN, JALALI, _DatePicker
     from .reports import Report, export
+    from .visuals import illustration
     from .workbook import make_template, read_workbook, update_workbook
 
     with TemporaryDirectory(prefix="niro-self-test-") as directory:
@@ -105,6 +106,24 @@ def _self_test(app, system_font, output):
                 assert window.summary.total == 1
                 assert sum(window.summary.periods[0].hires) == 1
                 assert window.summary.departures_by_status == 1
+
+                window.dashboard.selector.setCurrentIndex(window.dashboard.selector.findData(90))
+                for key in ("neon_night", "turquoise_wave", "warm_atlas"):
+                    window.set_page("settings", animate=False)
+                    choice = window.options.themes[key]
+                    assert not choice.icon().isNull()
+                    choice.click()
+                    assert window.theme == key and choice.isChecked()
+                    assert settings.value("theme") == key
+                    art = illustration(window.colors.graphic.artwork)
+                    assert not art.isNull() and art.hasAlphaChannel()
+                    window.set_page("dashboard", animate=False)
+                    assert window.dashboard.showcase.isVisible()
+                    assert window.dashboard.selector.currentData() == 90
+                    assert not window.dashboard.grab().isNull()
+                settings.sync()
+                reloaded = QSettings(str(root / "preferences.ini"), QSettings.Format.IniFormat)
+                assert reloaded.value("theme") == "warm_atlas"
 
                 window.set_page("reports")
                 window.reports.add_rule()

@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import (
     QDate, QEasingCurve, QObject, QPropertyAnimation, QRunnable, QSettings, QStandardPaths, QThreadPool, QTimer, Qt, Signal, Slot,
 )
-from PySide6.QtGui import QIcon, QPixmap
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication, QButtonGroup, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QMainWindow, QMessageBox,
     QStackedWidget, QVBoxLayout, QWidget,
@@ -24,7 +24,8 @@ from .pages import PeoplePage, ReportPage, SettingsPage
 from .record_fields import DEFAULT_COMBO_COLUMNS
 from .reports import Report, export
 from .state import Store, namespace
-from .theme import ASSETS, FONT_NAMES, THEMES, interface_font, style
+from .theme import ASSETS, FONT_NAMES, THEMES, application_palette, interface_font, style
+from .visuals import brandmark
 from .widgets import ColumnsDialog, ElidedLabel, RecordDialog, button, icon, label, row_layout
 from .workbook import WorkbookError, make_template, normalize, read_workbook, stamp, update_workbook
 
@@ -135,6 +136,7 @@ class Window(QMainWindow):
         app = QApplication.instance()
         app.setLayoutDirection(Qt.LayoutDirection.RightToLeft if self.language == "fa" else Qt.LayoutDirection.LeftToRight)
         app.setFont(interface_font(self.font_key, self.system_font))
+        app.setPalette(application_palette(self.colors, app.style().standardPalette()))
         app.setStyleSheet(style(self.colors))
 
     def _build(self):
@@ -151,9 +153,8 @@ class Window(QMainWindow):
         rail.setContentsMargins(17, 21, 17, 17)
         rail.setSpacing(10)
         brand = row_layout(11)
-        mark = label()
-        mark.setPixmap(QPixmap(str(ASSETS / "niro.png")).scaled(49, 49, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
-        brand.addWidget(mark)
+        self.brand_mark = label()
+        brand.addWidget(self.brand_mark)
         brand_copy = QVBoxLayout()
         brand_copy.setSpacing(0)
         self.brand = ElidedLabel("brandName")
@@ -265,13 +266,20 @@ class Window(QMainWindow):
         self._clear_notice()
 
     def _recolor(self):
+        self.brand_mark.setPixmap(brandmark(self.colors, 49))
         self.source_icon.setPixmap(icon("excel", self.colors.mint, 18).pixmap(18, 18))
         self.offline.setPixmap(icon("shield", self.colors.good, 17).pixmap(17, 17))
-        for key, item in self.nav.items():
-            item.setIcon(icon(key, self.colors.sidebar_text))
+        self._color_navigation()
         for page in self.pages.values():
             page.recolor(self.colors)
+        if self.record_dialog is not None:
+            self.record_dialog.recolor(self.colors)
         self._draw_source()
+
+    def _color_navigation(self):
+        for key, item in self.nav.items():
+            color = "#ffffff" if self.colors.graphic and key == self.page_key else self.colors.sidebar_text
+            item.setIcon(icon(key, color))
 
     def set_page(self, key, animate=True):
         target = self.pages[key]
@@ -280,6 +288,7 @@ class Window(QMainWindow):
         self.page_key = key
         self.stack.setCurrentWidget(target)
         self.nav[key].setChecked(True)
+        self._color_navigation()
         self.breadcrumb.setText(self.t("workspace") + " / " + self.t(key))
         if changed and animate and self.isVisible():
             effect = QGraphicsOpacityEffect(target)
@@ -625,7 +634,8 @@ class Window(QMainWindow):
         if operation != "add" and (not record or not any(item is record for item in view.records)):
             return
         choices = {key: self.catalog.get(key, ()) for key in self._combo_keys(view)}
-        dialog = RecordDialog(self, self.language, view.snapshot.columns, record, operation, choices=choices)
+        dialog = RecordDialog(self, self.language, view.snapshot.columns, record, operation,
+                              choices=choices, palette=self.colors)
         self.record_dialog = dialog
 
         def close_dialog():

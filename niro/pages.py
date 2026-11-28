@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QFrame, QGridLayout, QLineEdit, QScrollArea, QSizePolicy, QVBoxLayout, QWidget,
+    QButtonGroup, QComboBox, QFrame, QGridLayout, QLineEdit, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .filters import NO_VALUE, Rule
 from .locale import number, translate
 from .theme import FONT_NAMES, THEMES
+from .visuals import preview_icon
 from .widgets import (
     ColumnsDialog, DistinctValuesCombo, ElidedLabel, Hero, Metric, RuleEditor, TablePanel, button, card, field,
     fill_options, icon, label, row_layout, section_header,
@@ -202,8 +203,7 @@ class PeoplePage(QWidget):
         self._selection()
 
     def recolor(self, palette):
-        self.hero.palette = palette
-        self.hero.update()
+        self.hero.recolor(palette)
         self.search_icon.setIcon(icon("search", palette.muted, 17))
         self.table.recolor(palette)
         for item, name, color in (
@@ -237,7 +237,9 @@ class ReportPage(QWidget):
         self.export_button = button(self.t("export"), "primary")
         self.export_button.setEnabled(False)
         self.export_button.clicked.connect(self.export_requested)
-        header = QWidget()
+        header = QFrame()
+        header.setObjectName("sectionHeader")
+        self.report_header = header
         header_layout = row_layout(14)
         header_layout.setContentsMargins(0, 0, 0, 0)
         header.setLayout(header_layout)
@@ -411,6 +413,8 @@ class ReportPage(QWidget):
 
     def recolor(self, palette):
         self.palette = palette
+        padding, inset = (15, 12) if palette.graphic else (0, 0)
+        self.report_header.layout().setContentsMargins(padding, inset, padding, inset)
         self.report_badge.setStyleSheet(f"background: {palette.soft}; border: 1px solid {palette.line}; border-radius: 13px;")
         self.report_badge.setPixmap(icon("reports", palette.accent, 26).pixmap(26, 26))
         self.export_button.setIcon(icon("download", "#ffffff", 17))
@@ -451,8 +455,6 @@ class SettingsPage(QWidget):
         workbook.addWidget(connect, 0, Qt.AlignmentFlag.AlignBottom)
         workbook.addWidget(blank, 0, Qt.AlignmentFlag.AlignBottom)
         panel.addLayout(workbook)
-        layout.addWidget(source)
-
         appearance, panel = card()
         panel.addWidget(label(self.t("appearance"), "sectionTitle"))
         first = row_layout()
@@ -469,12 +471,33 @@ class SettingsPage(QWidget):
         fill_options(self.font_choice, ((key, self.t("font_" + key)) for key in FONT_NAMES), font)
         field(first, self.t("font"), self.font_choice)
         panel.addLayout(first)
-        panel.addWidget(label(self.t("theme"), "smallMuted"))
-        swatches = QGridLayout()
-        swatches.setSpacing(8)
+        panel.addWidget(label(self.t("graphic_themes"), "sectionTitle"))
+        previews = row_layout(9)
         self.theme_group = QButtonGroup(self)
         self.themes = {}
-        for index, (key, colors) in enumerate(THEMES.items()):
+        for key, colors in THEMES.items():
+            if colors.graphic is None:
+                continue
+            pick = QToolButton()
+            pick.setObjectName("graphicChoice")
+            pick.setText(self.t(key))
+            pick.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+            pick.setIcon(preview_icon(colors, rtl=language == "fa"))
+            pick.setIconSize(QSize(156, 84))
+            pick.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            pick.setCheckable(True)
+            pick.setChecked(key == theme)
+            pick.setProperty("themeKey", key)
+            pick.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.theme_group.addButton(pick)
+            self.themes[key] = pick
+            previews.addWidget(pick, 1)
+        panel.addLayout(previews)
+        panel.addWidget(label(self.t("color_themes"), "smallMuted"))
+        swatches = QGridLayout()
+        swatches.setSpacing(8)
+        simple_themes = [(key, colors) for key, colors in THEMES.items() if colors.graphic is None]
+        for index, (key, colors) in enumerate(simple_themes):
             pick = button(self.t(key), "swatch")
             pick.setCheckable(True)
             pick.setProperty("themeKey", key)
@@ -485,6 +508,7 @@ class SettingsPage(QWidget):
             self.themes[key] = pick
         panel.addLayout(swatches)
         layout.addWidget(appearance)
+        layout.addWidget(source)
 
         form_fields, panel = card()
         panel.addWidget(label(self.t("combo_setup"), "sectionTitle"))

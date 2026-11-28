@@ -8,12 +8,14 @@ from math import ceil, floor, log10
 import unicodedata
 
 from PySide6.QtCore import QCalendar, QDate, QEasingCurve, QEvent, QPointF, QRectF, Qt, QVariantAnimation
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
-from PySide6.QtWidgets import QComboBox, QFrame, QScrollArea, QToolTip, QVBoxLayout, QWidget
+from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtWidgets import QBoxLayout, QComboBox, QFrame, QScrollArea, QToolTip, QVBoxLayout, QWidget
 
 from .locale import PERSIAN_DIGITS, number
 from .record_fields import date_from_text
 from .state import View
+from .theme import linear_fill
+from .visuals import artwork_width, draw_banner
 from .widgets import ElidedLabel, card, fill_options, icon, label, row_layout, section_header
 from .workbook import normalize
 
@@ -171,11 +173,100 @@ def _date(language, date, full=False):
     return f"{year}{parts.month:02}/{parts.day:02}".translate(PERSIAN_DIGITS)
 
 
+def _smooth_line(points: list[QPointF]) -> QPainterPath:
+    path = QPainterPath(points[0])
+    for start, end in zip(points, points[1:]):
+        offset = (end.x() - start.x()) * 0.43
+        path.cubicTo(start.x() + offset, start.y(), end.x() - offset, end.y(), end.x(), end.y())
+    return path
+
+
+class _DashboardBanner(QWidget):
+    def __init__(self, title, lead, palette):
+        super().__init__()
+        self.design_palette = palette
+        self.content = QVBoxLayout(self)
+        self.content.setSpacing(5)
+        self.content.addStretch(1)
+        self.content.addWidget(label(title, "showcaseTitle", True))
+        self.content.addWidget(label(lead, "showcaseLead", True))
+        self.content.addSpacing(5)
+        self.content.addStretch(1)
+        self.setMinimumHeight(197)
+
+    def set_design(self, palette):
+        self.design_palette = palette
+        self._inset()
+        self.update()
+
+    def set_period_selector(self, selector):
+        self.content.insertWidget(self.content.count() - 1, selector, 0, Qt.AlignmentFlag.AlignLeading)
+
+    def _inset(self):
+        bounds = QRectF(self.rect())
+        artwork = round(artwork_width(bounds))
+        rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        self.content.setContentsMargins(22 + (artwork if rtl else 0), 15, 22 + (0 if rtl else artwork), 15)
+
+    def resizeEvent(self, event):
+        self._inset()
+        super().resizeEvent(event)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        rtl = self.layoutDirection() == Qt.LayoutDirection.RightToLeft
+        draw_banner(painter, QRectF(self.rect()), self.design_palette, rtl)
+
+
+class _MiniTrend(QWidget):
+    def __init__(self, language):
+        super().__init__()
+        self.rtl = language == "fa"
+        self.values = ()
+        self.color = QColor()
+        self.setFixedHeight(24)
+
+    def present(self, values, color):
+        self.values = values or ()
+        self.color = QColor(color)
+        self.setVisible(len(self.values) > 1)
+        self.update()
+
+    def paintEvent(self, event):
+        if len(self.values) < 2:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        plot = QRectF(self.rect()).adjusted(2, 3, -2, -2)
+        values = self.values[::-1] if self.rtl else self.values
+        peak = max(1, max(values))
+        points = [
+            QPointF(plot.left() + plot.width() * index / (len(values) - 1), plot.bottom() - plot.height() * value / peak)
+            for index, value in enumerate(values)
+        ]
+        line = _smooth_line(points)
+        fill = QPainterPath(line)
+        fill.lineTo(points[-1].x(), plot.bottom())
+        fill.lineTo(points[0].x(), plot.bottom())
+        fill.closeSubpath()
+        shade = QLinearGradient(plot.topLeft(), plot.bottomLeft())
+        tone = QColor(self.color)
+        tone.setAlpha(85)
+        shade.setColorAt(0, tone)
+        tone.setAlpha(0)
+        shade.setColorAt(1, tone)
+        painter.fillPath(fill, QBrush(shade))
+        painter.setPen(QPen(self.color, 1.7))
+        painter.drawPath(line)
+
+
 class _CountCard(QFrame):
-    def __init__(self, language, title, icon_name, tone):
+    def __init__(self, language, title, icon_name, tone, index):
         super().__init__()
         self.icon_name = icon_name
         self.tone = tone
+        self.index = index
+        self.design_colors = None
         self.setObjectName("surface")
         stack = QVBoxLayout(self)
         stack.setContentsMargins(15, 14, 15, 13)
@@ -185,7 +276,8 @@ class _CountCard(QFrame):
         self.mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.mark.setFixedSize(34, 34)
         header.addWidget(self.mark)
-        header.addWidget(label(title, "sectionTitle", True), 1)
+        self.heading = label(title, "sectionTitle", True)
+        header.addWidget(self.heading, 1)
         stack.addLayout(header)
         self.value = label("—", "metricValue")
         side = Qt.AlignmentFlag.AlignRight if language == "fa" else Qt.AlignmentFlag.AlignLeft
@@ -194,13 +286,31 @@ class _CountCard(QFrame):
         self.note = label("", "smallMuted", True)
         self.note.setAlignment(side | Qt.AlignmentFlag.AlignAbsolute | Qt.AlignmentFlag.AlignTop)
         stack.addWidget(self.note)
+        self.sparkline = _MiniTrend(language)
+        stack.addWidget(self.sparkline)
+        self.sparkline.hide()
         stack.addStretch()
 
     def recolor(self, palette):
-        color = getattr(palette, self.tone)
+        colors = self.design_colors = palette.graphic.metrics[self.index] if palette.graphic else None
+        color = colors.detail if colors else getattr(palette, self.tone)
+        if colors:
+            fill = linear_fill(colors.start, colors.end)
+            self.setStyleSheet(f"QFrame#surface {{ background: {fill}; border: 1px solid {color}; border-radius: 17px; }}")
+            self.heading.setStyleSheet(f"color: {colors.ink};")
+            self.value.setStyleSheet(f"color: {colors.ink}; font-size: 38px;")
+            self.note.setStyleSheet(f"color: {colors.ink};")
+        else:
+            self.setStyleSheet("")
+            for widget in (self.heading, self.value, self.note):
+                widget.setStyleSheet("")
         backing = QColor(color)
         self.mark.setStyleSheet(f"background: rgba({backing.red()}, {backing.green()}, {backing.blue()}, 28); border-radius: 11px;")
         self.mark.setPixmap(icon(self.icon_name, color, 19).pixmap(19, 19))
+
+    def set_series(self, values):
+        self.sparkline.present(values if self.design_colors else None,
+                               self.design_colors.detail if self.design_colors else "transparent")
 
 
 class _AnimatedChart(QWidget):
@@ -280,6 +390,40 @@ class _Trend(_AnimatedChart):
                 return True
         return super().event(event)
 
+    def _draw_lines(self, painter, plot, series, ceiling, step, rtl):
+        painter.save()
+        painter.setClipRect(plot.adjusted(-7, -8, 7, 2))
+        for values, color in series:
+            points = []
+            for index, value in enumerate(values):
+                slot = self.period.slots - 1 - index if rtl else index
+                x = plot.left() + step * (slot + 0.5)
+                y = plot.bottom() - plot.height() * value / ceiling * self.progress
+                points.append(QPointF(x, y))
+            line = _smooth_line(points)
+            area = QPainterPath(line)
+            area.lineTo(points[-1].x(), plot.bottom())
+            area.lineTo(points[0].x(), plot.bottom())
+            area.closeSubpath()
+            shade = QLinearGradient(plot.topLeft(), plot.bottomLeft())
+            tone = QColor(color)
+            tone.setAlpha(115 if self.palette.graphic.glow else 88)
+            shade.setColorAt(0, tone)
+            tone.setAlpha(6)
+            shade.setColorAt(1, tone)
+            painter.fillPath(area, QBrush(shade))
+            if self.palette.graphic.glow:
+                tone.setAlpha(45)
+                painter.setPen(QPen(tone, 9, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                painter.drawPath(line)
+            painter.setPen(QPen(QColor(color), 2.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            painter.drawPath(line)
+            painter.setBrush(QColor(self.palette.surface))
+            for point in points:
+                painter.drawEllipse(point, 3.4, 3.4)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.restore()
+
     def paintEvent(self, event):
         if self.period is None:
             return
@@ -297,7 +441,8 @@ class _Trend(_AnimatedChart):
             painter.drawText(plot.adjusted(14, 0, -14, 0), Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap, self.empty_text)
             return
         rtl = self.language == "fa"
-        series = [(values, color) for values, color in ((self.period.hires, colors.accent), (self.period.departures, colors.warning)) if values is not None]
+        chart_colors = colors.graphic.trend if colors.graphic else (colors.accent, colors.warning)
+        series = [(values, color) for values, color in zip((self.period.hires, self.period.departures), chart_colors) if values is not None]
         peak = max(max(values) for values, _ in series)
         division = max(1, ceil(peak / 4))
         power = 10 ** floor(log10(division))
@@ -312,11 +457,14 @@ class _Trend(_AnimatedChart):
             painter.setPen(QColor(colors.muted))
             painter.drawText(QRectF(plot.right() + 4 if rtl else 0, y - 10, axis_width - 3, 20), Qt.AlignmentFlag.AlignCenter, number(self.language, level))
         step = plot.width() / self.period.slots
+        lines_chart = colors.graphic is not None and colors.graphic.line_chart
+        if lines_chart and peak:
+            self._draw_lines(painter, plot, series, ceiling, step, rtl)
         bar = min(32.0, step * 0.56 / len(series))
         for i in range(self.period.slots):
             visual_index = self.period.slots - 1 - i if rtl else i
             x = plot.left() + step * (visual_index + 0.5)
-            for j, (values, color) in enumerate(series):
+            for j, (values, color) in enumerate(() if lines_chart else series):
                 value = values[i]
                 if not value:
                     continue
@@ -324,8 +472,8 @@ class _Trend(_AnimatedChart):
                 left = x + (j - len(series) / 2) * bar
                 fill = QLinearGradient(0, plot.bottom() - height, 0, plot.bottom())
                 primary = QColor(color)
-                fill.setColorAt(0, primary)
-                primary.setAlpha(134)
+                fill.setColorAt(0, primary.lighter(135) if colors.graphic else primary)
+                primary.setAlpha(227 if colors.graphic else 134)
                 fill.setColorAt(1, primary)
                 painter.setPen(Qt.PenStyle.NoPen)
                 painter.setBrush(fill)
@@ -351,26 +499,64 @@ class _Donut(_AnimatedChart):
             self.segments, self.total = segments, total
             self.animate()
 
+    def recolor(self, palette):
+        self.setFixedHeight(171 if palette.graphic else 143)
+        super().recolor(palette)
+
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        extent = min(110, self.width() - 26)
+        styled = self.palette.graphic is not None
+        stroke = 23 if styled else 14
+        extent = min(141 if styled else 110, max(1, self.width() - stroke - 14))
         ring = QRectF((self.width() - extent) / 2, (self.height() - extent) / 2, extent, extent)
-        painter.setPen(QPen(QColor(self.palette.line), 14))
+        painter.setPen(QPen(QColor(self.palette.line), stroke))
         painter.drawEllipse(ring)
         angle = 90.0
         for count, color in self.segments:
             span = count / self.total * 360
             gap = min(4, span * 0.2) if len(self.segments) > 1 else 0
-            painter.setPen(QPen(QColor(color), 14))
+            tone = QColor(color)
+            if styled:
+                luster = QLinearGradient(ring.topLeft(), ring.bottomRight())
+                luster.setColorAt(0, tone.lighter(130))
+                luster.setColorAt(0.55, tone)
+                luster.setColorAt(1, tone.darker(122))
+                painter.setPen(QPen(QBrush(luster), stroke, Qt.PenStyle.SolidLine, Qt.PenCapStyle.FlatCap))
+            else:
+                painter.setPen(QPen(tone, stroke))
             painter.drawArc(ring, round((angle - gap / 2) * 16), -round((span - gap) * 16 * self.progress))
             angle -= span
         painter.setPen(QColor(self.palette.text))
         font = painter.font()
         font.setBold(True)
-        font.setPointSizeF(font.pointSizeF() + 6)
+        font.setPointSizeF(font.pointSizeF() + (9 if styled else 6))
         painter.setFont(font)
         painter.drawText(ring, Qt.AlignmentFlag.AlignCenter, number(self.language, self.total))
+
+
+class _StatusComposition(QWidget):
+    def __init__(self, donut, legend):
+        super().__init__()
+        self.decorated = False
+        self.content = QBoxLayout(QBoxLayout.Direction.TopToBottom, self)
+        self.content.setContentsMargins(0, 0, 0, 0)
+        self.content.setSpacing(12)
+        self.content.addWidget(donut, 1)
+        self.content.addWidget(legend, 1)
+
+    def set_graphic(self, enabled):
+        self.decorated = enabled
+        self._orient()
+
+    def resizeEvent(self, event):
+        self._orient()
+        super().resizeEvent(event)
+
+    def _orient(self):
+        side_by_side = self.decorated and self.width() >= 318
+        direction = QBoxLayout.Direction.RightToLeft if side_by_side else QBoxLayout.Direction.TopToBottom
+        self.content.setDirection(direction)
 
 
 class DashboardPage(QWidget):
@@ -390,27 +576,35 @@ class DashboardPage(QWidget):
         area = QWidget()
         area.setObjectName("scrollContent")
         scroll.setWidget(area)
-        body = QVBoxLayout(area)
+        body = self.body = QVBoxLayout(area)
         body.setContentsMargins(27, 11, 27, 18)
         body.setSpacing(14)
 
-        header = row_layout(12)
+        self.plain_header = QWidget()
+        header = self.heading_layout = row_layout(12)
+        header.setContentsMargins(0, 0, 0, 0)
+        self.plain_header.setLayout(header)
         header.addWidget(section_header(self._t("title"), self._t("intro")), 1)
         self.selector = QComboBox()
         self.selector.setAccessibleName(self._t("period"))
         fill_options(self.selector, ((days, self._t("days", count=self._n(days))) for days, _ in _PERIODS))
         header.addWidget(self.selector)
-        body.addLayout(header)
+        body.addWidget(self.plain_header)
+        self.showcase = _DashboardBanner(self._t("title"), self._t("intro"), palette)
+        body.addWidget(self.showcase)
 
+        self.metric_row = QWidget()
         metrics = row_layout(11)
+        metrics.setContentsMargins(0, 0, 0, 0)
+        self.metric_row.setLayout(metrics)
         self.metrics = (
-            _CountCard(language, self._t("total"), "people", "accent"),
-            _CountCard(language, self._t("hire"), "plus", "good"),
-            _CountCard(language, self._t("exit"), "offline", "warning"),
+            _CountCard(language, self._t("total"), "people", "accent", 0),
+            _CountCard(language, self._t("hire"), "plus", "good", 1),
+            _CountCard(language, self._t("exit"), "departure", "warning", 2),
         )
         for metric in self.metrics:
             metrics.addWidget(metric, 1)
-        body.addLayout(metrics)
+        body.addWidget(self.metric_row)
 
         charts = row_layout(12)
         trend_frame, trend_body = card()
@@ -438,17 +632,38 @@ class DashboardPage(QWidget):
         status_frame, status_body = card()
         status_body.addWidget(label(self._t("statuses"), "sectionTitle", True))
         self.donut = _Donut(language, palette)
-        status_body.addWidget(self.donut)
         self.status_hint = label("", "smallMuted", True)
         status_body.addWidget(self.status_hint)
+        self.legend_area = QWidget()
+        legend_body = QVBoxLayout(self.legend_area)
+        legend_body.setContentsMargins(0, 0, 0, 0)
+        legend_body.addStretch()
         self.legend = QVBoxLayout()
-        self.legend.setSpacing(5)
-        status_body.addLayout(self.legend)
-        status_body.addStretch()
+        self.legend.setSpacing(6)
+        legend_body.addLayout(self.legend)
+        legend_body.addStretch()
+        self.status_composition = _StatusComposition(self.donut, self.legend_area)
+        status_body.addWidget(self.status_composition, 1)
         charts.addWidget(status_frame, 4)
         body.addLayout(charts, 1)
         self.selector.currentIndexChanged.connect(self._present_period)
         self.recolor(palette)
+
+    def resizeEvent(self, event):
+        self._place_metrics()
+        super().resizeEvent(event)
+
+    def _place_metrics(self):
+        design = self.palette.graphic
+        inside = design is not None and design.glow and self.width() >= 1040
+        in_banner = self.metric_row.parentWidget() is self.showcase
+        if inside and not in_banner:
+            self.body.removeWidget(self.metric_row)
+            self.showcase.content.insertWidget(self.showcase.content.count() - 1, self.metric_row)
+        elif in_banner and not inside:
+            self.showcase.content.removeWidget(self.metric_row)
+            self.body.insertWidget(self.body.indexOf(self.showcase) + 1, self.metric_row)
+        self.metric_row.show()
 
     def set_summary(self, summary: DashboardSummary):
         self.summary = summary
@@ -467,9 +682,10 @@ class DashboardPage(QWidget):
             exit_note = "exit_date"
         values = (summary.total, sum(period.hires) if period.hires is not None else None, departure_total)
         notes = ("total_note", "hire_note" if values[1] is not None else "hire_empty", exit_note)
-        for metric, value, note in zip(self.metrics, values, notes):
+        for metric, value, note, trend in zip(self.metrics, values, notes, (None, period.hires, period.departures)):
             metric.value.setText("—" if value is None else self._n(value))
             metric.note.setText(self._t(note) if summary.total is not None else "")
+            metric.set_series(trend)
         self.trend.set_period(period, self._t("unlinked" if summary.total is None else "trend_empty" if all(v is None for v in (period.hires, period.departures)) else "no_events"))
         for key, series in zip(("hire", "exit"), (period.hires, period.departures)):
             for widget in self.trend_keys[key]:
@@ -490,7 +706,7 @@ class DashboardPage(QWidget):
         hint = "unlinked" if total is None else "empty" if not total else "status_empty"
         self.status_hint.setText(self._t(hint))
         self.status_hint.setVisible(not statuses and total is not None)
-        self.donut.setVisible(bool(statuses))
+        self.status_composition.setVisible(bool(statuses))
         if not statuses:
             self.donut.set_counts((), 0)
             return
@@ -499,11 +715,19 @@ class DashboardPage(QWidget):
         if len(statuses) > 5:
             categories.append((self._t("other"), sum(count for _, count in statuses[5:]), ""))
         segments = []
-        for name, count, status in categories:
-            color = self.palette.warning if status in _DEPARTED else self.palette.good if status in _EMPLOYED else next(colors)
+        for index, (name, count, status) in enumerate(categories):
+            if self.palette.graphic:
+                color = self.palette.graphic.ring[index]
+            else:
+                color = self.palette.warning if status in _DEPARTED else self.palette.good if status in _EMPLOYED else next(colors)
             item = QWidget()
             line = row_layout(7)
-            line.setContentsMargins(0, 0, 0, 0)
+            if self.palette.graphic:
+                item.setObjectName("statusRow")
+                item.setStyleSheet(f"QWidget#statusRow {{ background: {self.palette.soft}; border-radius: 7px; }}")
+                line.setContentsMargins(6, 4, 6, 4)
+            else:
+                line.setContentsMargins(0, 0, 0, 0)
             item.setLayout(line)
             dot = label()
             dot.setFixedSize(9, 9)
@@ -519,10 +743,25 @@ class DashboardPage(QWidget):
 
     def recolor(self, palette):
         self.palette = palette
+        graphic = palette.graphic is not None
+        if graphic and self.selector.parentWidget() is not self.showcase:
+            self.heading_layout.removeWidget(self.selector)
+            self.showcase.set_period_selector(self.selector)
+        elif not graphic and self.selector.parentWidget() is not self.plain_header:
+            self.showcase.content.removeWidget(self.selector)
+            self.heading_layout.addWidget(self.selector)
+        self.plain_header.setVisible(not graphic)
+        self.showcase.setVisible(graphic)
+        self.selector.show()
+        self._place_metrics()
+        if graphic:
+            self.showcase.set_design(palette)
         for metric in self.metrics:
             metric.recolor(palette)
         self.trend.recolor(palette)
         self.donut.recolor(palette)
-        for key, color in (("hire", palette.accent), ("exit", palette.warning)):
+        self.status_composition.set_graphic(graphic)
+        trend_colors = palette.graphic.trend if graphic else (palette.accent, palette.warning)
+        for key, color in zip(("hire", "exit"), trend_colors):
             self.trend_keys[key][0].setStyleSheet(f"background:{color}; border-radius:4px;")
         self.set_summary(self.summary)
