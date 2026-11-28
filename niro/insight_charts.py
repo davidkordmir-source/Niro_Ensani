@@ -5,11 +5,11 @@ from math import atan2, ceil, degrees, floor, log10
 from PySide6.QtCore import QAbstractTableModel, QEvent, QModelIndex, QPointF, QRectF, Qt
 from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (
-    QComboBox, QGridLayout, QLayout, QStackedWidget, QTableView, QToolTip, QVBoxLayout, QWidget,
+    QGridLayout, QLayout, QStackedWidget, QTableView, QToolTip, QVBoxLayout, QWidget,
 )
 
 from .insights import Chart, format_value, tr
-from .widgets import button, escaped_tooltip, fill_options, label, row_layout
+from .widgets import ComboBox, button, escaped_tooltip, fill_options, label, row_layout
 
 
 def _colors(palette):
@@ -236,10 +236,10 @@ class ChartPanel(QWidget):
         self.data = Chart((), ())
         self.offset = 0
         self.plot = _Plot(language, palette)
-        self.types = QComboBox()
+        self.types = ComboBox()
         self.types.setAccessibleName(tr(language, "chart_type"))
         self.types.currentIndexChanged.connect(self._type_changed)
-        self.types.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.types.setSizeAdjustPolicy(ComboBox.SizeAdjustPolicy.AdjustToContents)
         self.table = QTableView()
         self.table.setAccessibleName(tr(language, "chart_table"))
         self.model = _DataTable(language, self.table)

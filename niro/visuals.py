@@ -1,4 +1,4 @@
-"""Illustration and preview painting for the three graphic designs."""
+"""Illustration and preview painting for the graphic designs."""
 
 from functools import lru_cache
 
@@ -14,9 +14,32 @@ def _tint(color: str, opacity: int) -> QColor:
     return result
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=8)
 def illustration(name: str) -> QImage:
     return QImage(str(ASSETS / "looks" / name))
+
+
+@lru_cache(maxsize=18)
+def _cover_image(name, crop, width, height, rtl):
+    source = QRectF(*crop)
+    scale = max(width / source.width(), height / source.height())
+    visible = QRectF(0, 0, width / scale, height / scale)
+    visible.moveCenter(source.center())
+
+    tile = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+    tile.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(tile)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+    painter.drawImage(QRectF(tile.rect()), illustration(name), visible)
+    painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+    edge, inner = (0, width) if rtl else (width, 0)
+    fade = QLinearGradient(edge, 0, inner, 0)
+    fade.setColorAt(0, QColor("white"))
+    fade.setColorAt(0.65, QColor("white"))
+    fade.setColorAt(1, QColor(Qt.GlobalColor.transparent))
+    painter.fillRect(tile.rect(), fade)
+    painter.end()
+    return tile
 
 
 def artwork_width(bounds: QRectF) -> float:
@@ -62,7 +85,12 @@ def draw_banner(painter: QPainter, bounds: QRectF, palette: Palette, rtl: bool, 
     painter.restore()
 
     art = illustration(design.artwork)
-    if not art.isNull() and width > 0:
+    if not art.isNull() and width > 0 and design.cover_art:
+        density = painter.device().devicePixelRatioF()
+        tile = _cover_image(design.artwork, design.crop, max(1, round(width * density)),
+                            max(1, round(bounds.height() * density)), rtl)
+        painter.drawImage(art_side, tile)
+    elif not art.isNull() and width > 0:
         area = art_side.adjusted(width * 0.04, bounds.height() * 0.045, -width * 0.06, -bounds.height() * 0.04)
         visible = QRectF(*design.crop)
         footprint = QSizeF(visible.size())

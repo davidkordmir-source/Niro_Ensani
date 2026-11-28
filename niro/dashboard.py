@@ -9,14 +9,14 @@ import unicodedata
 
 from PySide6.QtCore import QCalendar, QDate, QEasingCurve, QEvent, QPointF, QRectF, Qt, QVariantAnimation
 from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QBoxLayout, QComboBox, QFrame, QScrollArea, QToolTip, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QBoxLayout, QFrame, QScrollArea, QToolTip, QVBoxLayout, QWidget
 
 from .locale import PERSIAN_DIGITS, number
 from .record_fields import date_from_text
 from .state import View
 from .theme import linear_fill
 from .visuals import artwork_width, draw_banner
-from .widgets import ElidedLabel, card, fill_options, icon, label, row_layout, section_header
+from .widgets import ComboBox, ElidedLabel, card, fill_options, icon, label, row_layout, section_header
 from .workbook import normalize
 
 
@@ -585,7 +585,7 @@ class DashboardPage(QWidget):
         header.setContentsMargins(0, 0, 0, 0)
         self.plain_header.setLayout(header)
         header.addWidget(section_header(self._t("title"), self._t("intro")), 1)
-        self.selector = QComboBox()
+        self.selector = ComboBox()
         self.selector.setAccessibleName(self._t("period"))
         fill_options(self.selector, ((days, self._t("days", count=self._n(days))) for days, _ in _PERIODS))
         header.addWidget(self.selector)

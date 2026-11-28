@@ -48,10 +48,24 @@ jobs:
             echo "::error title=NSIS packaging::$(tail -12 "$log" | paste -sd ' ' -)"
             exit 1
           fi
+      - name: Bundle the installer and complete source
+        shell: bash
+        run: |
+          version="$(python -c 'from niro import __version__; print(__version__)')"
+          folder="NiroDesk-$version"
+          archive="$GITHUB_WORKSPACE/dist/NiroDesk-Windows-x64-with-source.zip"
+          git archive --format=zip --prefix="$folder/Source/" --output="$archive" HEAD
+          mkdir -p "$RUNNER_TEMP/$folder"
+          cp dist/NiroDesk-Setup-x64.exe* "$RUNNER_TEMP/$folder/"
+          cd "$RUNNER_TEMP"
+          zip -q -0 "$archive" "$folder/NiroDesk-Setup-x64.exe" "$folder/NiroDesk-Setup-x64.exe.sha256"
+          unzip -tq "$archive"
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: NiroDesk-Windows-x64
-          path: dist/NiroDesk-Setup-x64.exe*
+          path: |
+            dist/NiroDesk-Setup-x64.exe*
+            dist/NiroDesk-Windows-x64-with-source.zip
           if-no-files-found: error
 
   installed-smoke:
@@ -66,9 +80,17 @@ jobs:
         shell: pwsh
         run: |
           try {
-            $setup = Join-Path $PWD "installer/NiroDesk-Setup-x64.exe"
+            $bundle = Join-Path $PWD 'installer/NiroDesk-Windows-x64-with-source.zip'
+            $destination = Join-Path $env:RUNNER_TEMP 'niro-bundle'
+            Expand-Archive -LiteralPath $bundle -DestinationPath $destination
+            $folders = @(Get-ChildItem -LiteralPath $destination -Directory)
+            if ($folders.Count -ne 1) { throw "Expected one bundle folder" }
+            $folder = $folders[0].FullName
+            if (!(Test-Path (Join-Path $folder 'Source/niro/__main__.py'))) { throw "Missing application source" }
+            $setup = Join-Path $folder 'NiroDesk-Setup-x64.exe'
             $expected = ((Get-Content "$setup.sha256") -split '\s+')[0]
             if ((Get-FileHash $setup -Algorithm SHA256).Hash -ne $expected) { throw "Installer checksum mismatch" }
+            if ((Get-FileHash 'installer/NiroDesk-Setup-x64.exe' -Algorithm SHA256).Hash -ne $expected) { throw "Standalone installer differs from bundle" }
             $installed = Start-Process $setup -ArgumentList "/S" -Wait -PassThru
             if ($installed.ExitCode -ne 0) { throw "Installer failed: $($installed.ExitCode)" }
             $root = Join-Path $env:LOCALAPPDATA 'Programs/NiroDesk'
@@ -100,12 +122,13 @@ jobs:
         with:
           name: NiroDesk-Windows-x64
           path: installer
-      - name: Publish direct installation download
+      - name: Publish desktop bundle and installer
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            installer/NiroDesk-Windows-x64-with-source.zip \
             installer/NiroDesk-Setup-x64.exe installer/NiroDesk-Setup-x64.exe.sha256 \
             --verify-tag --title "Niro Desk $GITHUB_REF_NAME" \
-            --notes "Offline 64-bit Windows installer for Niro Desk. Install it, then connect your local XLSX workbook. The installer includes no personnel data."
+            --notes "Download the ZIP to get the offline Windows x64 installer and full source code in one folder. Extract the archive, run NiroDesk-Setup-x64.exe, then connect your local XLSX workbook."

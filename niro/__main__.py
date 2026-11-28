@@ -58,14 +58,15 @@ class Splash(QWidget):
 
 
 def _self_test(app, system_font, output):
-    from PySide6.QtCore import QCoreApplication, QDate, QEvent
-    from PySide6.QtWidgets import QComboBox
+    from PySide6.QtCore import QCoreApplication, QDate, QEvent, QPoint, QPointF, QRectF
+    from PySide6.QtGui import QFontDatabase, QWheelEvent
 
     from .insights import load_dataset, prepare_profile, save_attendance
     from .record_fields import DateField, GREGORIAN, JALALI, _DatePicker
     from .reports import Report, export
     from .schema import PROFILE_SHEET
     from .visuals import illustration
+    from .widgets import ComboBox
     from .workbook import companion_snapshots, label_key, make_template, read_workbook, update_workbook
 
     with TemporaryDirectory(prefix="niro-self-test-") as directory:
@@ -141,22 +142,34 @@ def _self_test(app, system_font, output):
                 assert window.analytics.compare_chart.data.table_only
 
                 window.dashboard.selector.setCurrentIndex(window.dashboard.selector.findData(90))
-                for key in ("neon_night", "turquoise_wave", "warm_atlas"):
+                window.set_page("settings", animate=False)
+                available = set(QFontDatabase.families())
+                assert set(FONT_NAMES.values()) - {""} <= available
+                assert window.options.font_choice.count() == len(FONT_NAMES)
+                for key, palette in THEMES.items():
+                    if palette.graphic is None:
+                        continue
+                    choice = window.options.themes[key]
+                    art = illustration(palette.graphic.artwork)
+                    assert not choice.icon().isNull() and not art.isNull(), key
+                    assert QRectF(art.rect()).contains(QRectF(*palette.graphic.crop)), key
+                for key in ("neon_night", "turquoise_wave", "warm_atlas", "citrus_studio", "blueprint"):
                     window.set_page("settings", animate=False)
                     choice = window.options.themes[key]
-                    assert not choice.icon().isNull()
                     choice.click()
                     assert window.theme == key and choice.isChecked()
                     assert settings.value("theme") == key
-                    art = illustration(window.colors.graphic.artwork)
-                    assert not art.isNull() and art.hasAlphaChannel()
                     window.set_page("dashboard", animate=False)
                     assert window.dashboard.showcase.isVisible()
                     assert window.dashboard.selector.currentData() == 90
                     assert not window.dashboard.grab().isNull()
+                window.set_page("settings", animate=False)
+                font_choice = window.options.font_choice
+                font_choice.setCurrentIndex(font_choice.findData("inter"))
+                assert app.font().family() == "Inter"
                 settings.sync()
                 reloaded = QSettings(str(root / "preferences.ini"), QSettings.Format.IniFormat)
-                assert reloaded.value("theme") == "warm_atlas"
+                assert reloaded.value("theme") == "blueprint" and reloaded.value("font") == "inter"
 
                 window.set_page("reports")
                 window.reports.add_rule()
@@ -173,7 +186,15 @@ def _self_test(app, system_font, output):
 
                 window._record("add")
                 form = window.record_dialog
-                assert isinstance(form.editors[marital], QComboBox)
+                marital_choice = form.editors[marital]
+                assert isinstance(marital_choice, ComboBox)
+                marital_choice.setCurrentIndex(0)
+                marital_choice.setFocus()
+                wheel = QWheelEvent(QPointF(5, 5), QPointF(marital_choice.mapToGlobal(QPoint(5, 5))),
+                                    QPoint(), QPoint(0, -120), Qt.MouseButton.NoButton,
+                                    Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+                QApplication.sendEvent(marital_choice, wheel)
+                assert marital_choice.currentIndex() == 0 and not wheel.isAccepted()
                 assert isinstance(form.editors[start], DateField)
                 assert form.windowFlags() & Qt.WindowType.WindowMinMaxButtonsHint
                 form.reject()

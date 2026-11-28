@@ -1,12 +1,12 @@
 """Workbook-backed sport attendance entry and history."""
 
 from PySide6.QtCore import QAbstractTableModel, QDate, QModelIndex, QTimer, Qt, Signal
-from PySide6.QtWidgets import QComboBox, QDialog, QLineEdit, QStackedWidget, QTableView, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QLineEdit, QStackedWidget, QTableView, QVBoxLayout, QWidget
 
 from .insights import SPORT_STATES, date_label, format_value, tr
 from .insights_page import person_options
 from .record_fields import DateField, date_from_text
-from .widgets import button, card, escaped_tooltip, field, fill_options, icon, label, row_layout, section_header
+from .widgets import ComboBox, button, card, escaped_tooltip, field, fill_options, icon, label, row_layout, section_header
 from .workbook import normalize
 
 
@@ -25,8 +25,8 @@ class AttendanceDialog(QDialog):
         layout.setContentsMargins(20, 18, 20, 18)
         layout.addWidget(label(title, "pageTitle", True))
         layout.addWidget(label(self.t("attendance_lead"), "muted", True))
-        self.person = QComboBox()
-        self.person.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.person = ComboBox()
+        self.person.setSizeAdjustPolicy(ComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         empty = entry.name or self.t("unmatched_person") if entry and entry.ref is None else self.t("choose_person")
         fill_options(self.person, [(None, empty), *person_options(dataset, language, stable_only=True)],
                      entry.ref if entry else None)
@@ -35,7 +35,7 @@ class AttendanceDialog(QDialog):
         self.day = DateField(date_label(entry.day if entry else QDate.currentDate(), language), language)
         self.day.recolor(palette.text)
         field(details, self.t("session_date"), self.day, 2)
-        self.status = QComboBox()
+        self.status = ComboBox()
         fill_options(self.status, ((state, self.t(state)) for state in SPORT_STATES), entry.status if entry else "present")
         field(details, self.t("status"), self.status)
         layout.addLayout(details)
@@ -150,7 +150,7 @@ class AttendancePage(QWidget):
         self.search.setAccessibleName(self.t("search_attendance"))
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(lambda: self.timer.start())
-        self.status = QComboBox()
+        self.status = ComboBox()
         fill_options(self.status, [("", self.t("status_all")), *((valid, self.t(valid)) for valid in SPORT_STATES)])
         self.status.currentIndexChanged.connect(self.refresh)
         header.addWidget(self.search, 2)

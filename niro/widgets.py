@@ -78,6 +78,13 @@ def field(layout, title: str, widget, stretch=1):
     return stack
 
 
+class ComboBox(QComboBox):
+    """Leave wheel gestures to the page or the open popup list."""
+
+    def wheelEvent(self, event):
+        event.ignore()
+
+
 def fill_options(combo: QComboBox, options, value=None) -> None:
     combo.blockSignals(True)
     combo.clear()
@@ -451,7 +458,7 @@ class _ValueListModel(QAbstractListModel):
             return -1
 
 
-class DistinctValuesCombo(QComboBox):
+class DistinctValuesCombo(ComboBox):
     """Use an immutable value sequence directly, even for columns with many distinct values."""
 
     choiceChanged = Signal()
@@ -514,10 +521,10 @@ class RuleEditor(QFrame):
         super().__init__()
         self.setObjectName("rule")
         t = lambda key: translate(language, key)
-        self.columns = QComboBox()
+        self.columns = ComboBox()
         self.columns.setAccessibleName(t("report_columns"))
         self.columns.setMinimumWidth(105)
-        self.operators = QComboBox()
+        self.operators = ComboBox()
         self.operators.setAccessibleName(t("rules"))
         self.distinct_values = distinct_values if distinct_values is not None else {}
         self.value = DistinctValuesCombo(t("rule_value"))
@@ -702,7 +709,7 @@ class RecordDialog(QDialog):
             body.addStretch()
             scroll.setWidget(content)
             layout.addWidget(scroll, 1)
-        self.scope = QComboBox()
+        self.scope = ComboBox()
         choices = [("local", self.t("scope_local"))]
         if operation != "delete" or (record and record.source):
             choices.append(("excel", self.t("scope_excel")))

@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFormLayout, QGridLayout, QScrollArea, QVBoxLayout, QWidget,
+    QDialog, QFormLayout, QGridLayout, QScrollArea, QVBoxLayout, QWidget,
 )
 
 from .insight_charts import ChartPanel
@@ -10,7 +10,7 @@ from .insights import FIELD_NAMES, GROUPS, METRICS, Query, date_label, format_va
 from .locale import translate
 from .pages import _scroll
 from .record_fields import DateField, date_from_text
-from .widgets import ColumnsDialog, button, card, field, fill_options, icon, label, row_layout, section_header
+from .widgets import ColumnsDialog, ComboBox, button, card, field, fill_options, icon, label, row_layout, section_header
 from .workbook import Column
 
 
@@ -41,11 +41,11 @@ class SourceDialog(QDialog):
         self.fields = {}
         options = (("", tr(language, "source_auto")), *((col.key, col.title(language)) for col in columns))
         for key in FIELD_NAMES:
-            combo = QComboBox()
+            combo = ComboBox()
             fill_options(combo, options, bindings.get(key, ""))
             form.addRow(label(tr(language, "field_" + key)), combo)
             self.fields[key] = combo
-        self.scale = QComboBox()
+        self.scale = ComboBox()
         fill_options(self.scale, (("percent", tr(language, "scale_percent")), ("five", tr(language, "scale_five"))), scale)
         form.addRow(label(tr(language, "scale")), self.scale)
         scroll.setWidget(body)
@@ -141,17 +141,17 @@ class AnalyticsPage(QWidget):
         selection = row_layout()
         self.metric_button = button(self.t("pick_metrics"), "primary")
         field(selection, self.t("metrics"), self.metric_button)
-        self.group = QComboBox()
+        self.group = ComboBox()
         fill_options(self.group, ((key, self.t("group_" + key)) for key in GROUPS), settings.value("analytics/group", "membership", str))
         field(selection, self.t("group"), self.group, 2)
-        self.person = QComboBox()
-        self.person.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.person = ComboBox()
+        self.person.setSizeAdjustPolicy(ComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.person.setMinimumContentsLength(10)
         field(selection, self.t("person"), self.person, 2)
         content.addLayout(selection)
 
         dates = row_layout()
-        self.preset = QComboBox()
+        self.preset = ComboBox()
         fill_options(self.preset, ((key, self.t(key)) for key in _PRESETS), settings.value("analytics/preset", "year", str))
         field(dates, self.t("event_period"), self.preset)
         self.start = DateField("", language)

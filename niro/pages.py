@@ -4,15 +4,15 @@ from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import (
-    QButtonGroup, QComboBox, QFrame, QGridLayout, QLineEdit, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
+    QButtonGroup, QFrame, QGridLayout, QLineEdit, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget,
 )
 
 from .filters import NO_VALUE, Rule
 from .locale import number, translate
-from .theme import FONT_NAMES, THEMES
+from .theme import FONT_NAMES, THEMES, interface_font
 from .visuals import preview_icon
 from .widgets import (
-    ColumnsDialog, DistinctValuesCombo, ElidedLabel, Hero, Metric, RuleEditor, TablePanel, button, card, field,
+    ColumnsDialog, ComboBox, DistinctValuesCombo, ElidedLabel, Hero, Metric, RuleEditor, TablePanel, button, card, field,
     fill_options, icon, label, row_layout, section_header,
 )
 from .workbook import is_companion
@@ -98,7 +98,7 @@ class PeoplePage(QWidget):
         self.term.setAccessibleName(self.t("search"))
         self.term.setClearButtonEnabled(True)
         self.search_icon = self.term.addAction(icon("search", palette.muted, 17), QLineEdit.ActionPosition.LeadingPosition)
-        self.search_column = QComboBox()
+        self.search_column = ComboBox()
         self.search_column.setAccessibleName(self.t("directory_column"))
         self.search_column.setMinimumWidth(145)
         self.search_column.setMaximumWidth(274)
@@ -258,9 +258,9 @@ class ReportPage(QWidget):
         self.title.setPlaceholderText(self.t("report_default"))
         self.column_button = button(self.t("choose_columns"))
         self.column_button.clicked.connect(self.choose_columns)
-        self.style = QComboBox()
+        self.style = ComboBox()
         fill_options(self.style, [(key, self.t(key)) for key in ("formal", "modern")])
-        self.format = QComboBox()
+        self.format = ComboBox()
         fill_options(self.format, [("." + key, self.t(key)) for key in ("xlsx", "docx", "pptx", "csv")])
         field(top, self.t("report_name"), self.title, 3)
         field(top, self.t("report_columns"), self.column_button)
@@ -277,7 +277,7 @@ class ReportPage(QWidget):
         controls = row_layout()
         controls.addWidget(label(self.t("rules"), "sectionTitle"))
         controls.addStretch()
-        self.combine = QComboBox()
+        self.combine = ComboBox()
         fill_options(self.combine, [(False, self.t("rule_all")), (True, self.t("rule_any"))])
         self.combine.currentIndexChanged.connect(self.rules_changed)
         self.add_rule_button = button(self.t("add_rule"))
@@ -425,6 +425,33 @@ class ReportPage(QWidget):
         self.table.recolor(palette)
 
 
+class _GraphicGallery(QWidget):
+    def __init__(self, choices):
+        super().__init__()
+        self.choices = tuple(choices)
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self.grid.setSpacing(9)
+        self.columns = 0
+        self._reflow(3)
+
+    def _reflow(self, columns):
+        if columns == self.columns:
+            return
+        self.columns = columns
+        while self.grid.count():
+            self.grid.takeAt(0)
+        for index in range(4):
+            self.grid.setColumnStretch(index, int(index < columns))
+        for index, choice in enumerate(self.choices):
+            self.grid.addWidget(choice, index // columns, index % columns)
+
+    def resizeEvent(self, event):
+        width = event.size().width()
+        self._reflow(4 if width >= 720 else 3 if width >= 529 else 2)
+        super().resizeEvent(event)
+
+
 class SettingsPage(QWidget):
     connect_source = Signal()
     create_template = Signal()
@@ -435,7 +462,7 @@ class SettingsPage(QWidget):
     reset_local = Signal()
     configure_combos = Signal()
 
-    def __init__(self, language, palette, font, theme, name):
+    def __init__(self, language, palette, font, theme, name, system_font):
         super().__init__()
         self.language = language
         self.t = lambda key, **values: translate(language, key, **values)
@@ -449,7 +476,7 @@ class SettingsPage(QWidget):
         self.path = ElidedLabel("muted")
         panel.addWidget(self.path)
         workbook = row_layout()
-        self.sheet = QComboBox()
+        self.sheet = ComboBox()
         field(workbook, self.t("sheet"), self.sheet, 2)
         connect = button(self.t("change_source"))
         blank = button(self.t("blank_workbook"))
@@ -465,15 +492,25 @@ class SettingsPage(QWidget):
         save = button(self.t("save_settings"))
         field(first, self.t("app_name"), self.name, 2)
         first.addWidget(save, 0, Qt.AlignmentFlag.AlignBottom)
-        self.language_choice = QComboBox()
+        self.language_choice = ComboBox()
         fill_options(self.language_choice, (("fa", "فارسی"), ("en", "English")), language)
         field(first, self.t("language"), self.language_choice)
-        self.font_choice = QComboBox()
-        fill_options(self.font_choice, ((key, self.t("font_" + key)) for key in FONT_NAMES), font)
-        field(first, self.t("font"), self.font_choice)
         panel.addLayout(first)
+
+        fonts = row_layout(16)
+        self.font_choice = ComboBox()
+        self.font_choice.setSizeAdjustPolicy(ComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.font_choice.setMinimumContentsLength(14)
+        self.font_choice.setMaxVisibleItems(12)
+        self.font_choice.setStyleSheet("combobox-popup: 0;")
+        fill_options(self.font_choice, ((key, self.t("font_" + key)) for key in FONT_NAMES), font)
+        for index, key in enumerate(FONT_NAMES):
+            self.font_choice.setItemData(index, interface_font(key, system_font), Qt.ItemDataRole.FontRole)
+        field(fonts, self.t("font"), self.font_choice)
+        sample = label(self.t("font_sample"), "sectionTitle", True)
+        field(fonts, self.t("font_preview"), sample, 2)
+        panel.addLayout(fonts)
         panel.addWidget(label(self.t("graphic_themes"), "sectionTitle"))
-        previews = row_layout(9)
         self.theme_group = QButtonGroup(self)
         self.themes = {}
         for key, colors in THEMES.items():
@@ -492,8 +529,8 @@ class SettingsPage(QWidget):
             pick.setCursor(Qt.CursorShape.PointingHandCursor)
             self.theme_group.addButton(pick)
             self.themes[key] = pick
-            previews.addWidget(pick, 1)
-        panel.addLayout(previews)
+        self.graphic_gallery = _GraphicGallery(self.themes.values())
+        panel.addWidget(self.graphic_gallery)
         panel.addWidget(label(self.t("color_themes"), "smallMuted"))
         swatches = QGridLayout()
         swatches.setSpacing(8)
@@ -528,12 +565,12 @@ class SettingsPage(QWidget):
         panel.addWidget(label(self.t("backup_lead"), "muted", True))
         self.local_state = label("", "smallMuted", True)
         panel.addWidget(self.local_state)
-        actions = row_layout()
+        actions = QVBoxLayout()
+        actions.setSpacing(8)
         self.backup_button = button(self.t("backup"))
         self.reset_button = button(self.t("reset_local"), "danger")
-        actions.addWidget(self.backup_button)
-        actions.addWidget(self.reset_button)
-        actions.addStretch()
+        actions.addWidget(self.backup_button, 0, Qt.AlignmentFlag.AlignLeading)
+        actions.addWidget(self.reset_button, 0, Qt.AlignmentFlag.AlignLeading)
         panel.addLayout(actions)
         layout.addWidget(security)
         layout.addStretch()

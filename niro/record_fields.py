@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QPushButton, QTableView, QToolButton, QVBoxLayout, QWidget,
 )
 
+from .widgets import ComboBox
 from .workbook import DIGITS, label_key
 
 
@@ -222,7 +223,7 @@ class _DatePicker(QDialog):
 
         top = QHBoxLayout()
         detail = QLabel("نوع تقویم" if fa else "Calendar")
-        self.kind = QComboBox()
+        self.kind = ComboBox()
         self.kind.addItem("هجری شمسی" if fa else "Solar Hijri", JALALI)
         self.kind.addItem("میلادی" if fa else "Gregorian", GREGORIAN)
         self.kind.setAccessibleName(detail.text())

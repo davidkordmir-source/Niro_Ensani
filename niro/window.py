@@ -236,7 +236,7 @@ class Window(QMainWindow):
         self.people = PeoplePage(self.language, self.colors)
         self.attendance = AttendancePage(self.language, self.colors)
         self.reports = ReportPage(self.language, self.colors)
-        self.options = SettingsPage(self.language, self.colors, self.font_key, self.theme, self.display_name)
+        self.options = SettingsPage(self.language, self.colors, self.font_key, self.theme, self.display_name, self.system_font)
         for key, page in (
             ("dashboard", self.dashboard), ("analytics", self.analytics), ("people", self.people),
             ("attendance", self.attendance), ("reports", self.reports), ("settings", self.options),
